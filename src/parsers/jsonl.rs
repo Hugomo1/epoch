@@ -28,7 +28,9 @@ impl LogParser for JsonlParser {
             return Ok(None);
         }
 
-        let obj = value.as_object().expect("checked is_object above");
+        let Some(obj) = value.as_object() else {
+            return Ok(None);
+        };
 
         let loss = obj.get("loss").and_then(|v| v.as_f64());
 

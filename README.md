@@ -1,84 +1,163 @@
-# Epoch
+<div align="center">
 
-Terminal-based real-time monitoring dashboard for AI/ML training runs.
+<img src="docs/logo.svg" width="100%" alt="epoch logo"/>
 
-<!-- TODO: Add CI badge (GitHub Actions) -->
-<!-- TODO: Add crates.io badge -->
-<!-- TODO: Add license badge -->
+<br>
 
-## Features
+[![build](https://img.shields.io/badge/build-passing-21262d?style=flat-square)]()
+[![kernel](https://img.shields.io/badge/kernel-rust-21262d?style=flat-square)]()
+[![telemetry](https://img.shields.io/badge/telemetry-active-21262d?style=flat-square)]()
 
-- **Training Metrics**: Real-time loss, learning rate, training steps, throughput, and token tracking
-- **System Metrics**: GPU utilization, VRAM, CPU usage, and RAM monitoring
-- **Multi-View TUI**: Dynamic tab-based interface for switching between dashboards
-- **Multiple Log Formats**: Support for JSONL (primary) and custom regex patterns
-- **Stdin Support**: Pipe training metrics directly from your training script
+<br>
 
-## Installation
+</div>
 
-### From Source
+**epoch** is a terminal-native telemetry console for AI/ML training workloads.
 
-```bash
-git clone https://github.com/epoch-ml/epoch.git
-cd epoch
-cargo build --release
-./target/release/epoch
+It provides **real-time observability for model training** directly in the terminal — combining **training metrics** and **hardware telemetry** into a single responsive interface.
+
+<!-- TODO: record demo → uncomment below -->
+<!-- ## Visual Proof -->
+<!-- ![demo](docs/demo.gif) -->
+
+## ❯ Capabilities
+
+```
+╔═════════════════════════════════════════════════════════════════════╗
+║                     EPOCH TELEMETRY MATRIX                          ║
+╠════════════════════════════╦════════════════════════════════════════╣
+║ TRAINING METRICS           ║ HARDWARE TELEMETRY                     ║
+╠════════════════════════════╬════════════════════════════════════════╣
+║ Loss monitoring            ║ GPU utilization                        ║
+║ Learning rate tracking     ║ VRAM usage                             ║
+║ Training steps / epochs    ║ CPU load                               ║
+║ Tokens / samples per sec   ║ System memory                          ║
+║ Throughput visualization   ║ Optional NVML GPU support              ║
+╚════════════════════════════╩════════════════════════════════════════╝
 ```
 
-### Using Cargo
+Additional system capabilities:
+
+- **Multi-view TUI**
+  Dashboard / Metrics / System tabs
+
+- **Multiple log formats**
+  JSONL + custom regex patterns
+
+- **Pipe-based streaming input**
+
+## Protocol
+
+### Installation
 
 ```bash
-cargo install --path .
+$ git clone https://github.com/grannejanne/epoch.git
+$ cd epoch
+$ cargo build --release
+$ ./target/release/epoch
 ```
 
-(Publishing to crates.io coming soon)
-
-## Usage
-
-### Monitor a Training Log File
+Optional CPU-only build:
 
 ```bash
-epoch --log-file train.log
+$ cargo build --release --no-default-features
 ```
 
-### Read Metrics from Stdin
+### Monitor a training log
 
 ```bash
-python train.py 2>&1 | epoch --stdin
+$ epoch train.log
 ```
 
-### Monitor Multiple Metrics
+### Stream directly from a training process
 
-Epoch automatically detects and parses training metrics from your logs, displaying them alongside live system metrics (GPU, CPU, RAM).
+```bash
+$ python train.py 2>&1 | epoch --stdin
+```
 
-## Supported Log Formats
+This allows **zero-integration monitoring** without modifying training scripts.
 
-### v0.1.0 (Current)
+### Override parser
 
-- **JSONL** (JSON Lines): `{"loss": 0.5, "step": 100, "lr": 1e-4}`
-- **Custom Regex**: User-defined patterns for framework-specific logs
+```bash
+$ epoch --parser regex train.log
+```
 
-### Planned for v0.2.0+
+Supported parsers:
 
-- CSV format
-- TensorBoard event files
-- HuggingFace Trainer native format
+```
+auto
+jsonl
+csv
+regex
+```
+
+## Interaction
+
+### Keyboard Controls
+
+```
+┌──────────────┬─────────────────────────┐
+│ Key          │ Action                  │
+├──────────────┼─────────────────────────┤
+│ Tab / →      │ Next tab                │
+│ Shift+Tab / ←│ Previous tab            │
+│ 1 2 3        │ Jump to tab             │
+│ q / Ctrl+C   │ Quit                    │
+└──────────────┴─────────────────────────┘
+```
+
+## Stream Formats
+
+### Current (v0.1.0)
+
+```
+JSONL
+{"loss": 0.53, "step": 120, "lr": 1e-4}
+```
+
+```
+Regex
+custom framework training logs
+```
+
+### Planned
+
+```
+CSV training logs
+TensorBoard event files
+```
 
 ## Configuration
 
-Configuration can be provided via TOML file at `~/.config/epoch/config.toml`:
+Configuration file:
 
-```toml
-[ui]
-refresh_rate_ms = 100
-theme = "dark"
-
-[metrics]
-auto_detect = true
+```
+~/.config/epoch/config.toml
 ```
 
-See CONTRIBUTING.md for configuration examples and defaults.
+Example:
 
-## License
+```toml
+refresh_rate_ms = 100
+parser = "auto"
+```
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+## Future
+
+```
+SYSTEM_DIAGNOSTICS
+```
+
+```
+[ ] TensorBoard stream ingestion
+[ ] Multi-run comparison
+[ ] Training loss graph smoothing
+[ ] Distributed training telemetry
+[ ] HuggingFace Trainer integration
+[ ] WebSocket metric streaming
+```
+
+## ❯ License
+
+MIT — see `LICENSE` for details.

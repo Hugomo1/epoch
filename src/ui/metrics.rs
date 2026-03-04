@@ -41,11 +41,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    let latest = app
-        .training
-        .latest
-        .as_ref()
-        .expect("Already checked is_none()");
+    let Some(latest) = app.training.latest.as_ref() else {
+        return;
+    };
 
     // 1. Loss Sparkline
     let loss_history: Vec<u64> = app.training.loss_history.iter().copied().collect();
@@ -190,7 +188,10 @@ fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
         return "→";
     }
 
-    let last = *history.back().expect("history len >= 2") as f64;
+    let Some(&last) = history.back() else {
+        return "→";
+    };
+    let last = last as f64;
     let count = (history.len() - 1).min(10);
 
     // Average of the preceding 'count' elements (excluding the very last one)

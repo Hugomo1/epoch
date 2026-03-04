@@ -68,7 +68,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().fg(LOSS_COLOR));
     frame.render_widget(sparkline, top_chunks[0]);
 
-    let latest = app.training.latest.as_ref().unwrap();
+    let Some(latest) = app.training.latest.as_ref() else {
+        return;
+    };
     let loss_str = latest
         .loss
         .map(format_loss)

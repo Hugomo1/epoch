@@ -68,6 +68,8 @@ pub fn spawn_file_watcher(
     Ok(tokio::spawn(async move {
         use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode};
 
+        // NOTE: notify crate requires std::sync::mpsc::Sender (unbounded).
+        // Back-pressure is applied via the bounded tokio channel bridge below.
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
         let _watcher_guard = {
             let mut watcher = match RecommendedWatcher::new(notify_tx, NotifyConfig::default()) {

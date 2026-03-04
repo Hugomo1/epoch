@@ -56,7 +56,6 @@ pub fn spawn_event_reader(tx: mpsc::Sender<Event>) -> JoinHandle<()> {
         while let Some(Ok(event)) = reader.next().await {
             let mapped = match event {
                 crossterm::event::Event::Key(key) => Event::Key(key),
-                crossterm::event::Event::Mouse(mouse) => Event::Mouse(mouse),
                 crossterm::event::Event::Resize(width, height) => Event::Resize(width, height),
                 _ => continue,
             };
