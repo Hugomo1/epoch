@@ -127,12 +127,12 @@ impl App {
         self.training.latest = Some(m.clone());
 
         if let Some(loss) = m.loss {
-            let scaled = (loss * 1000.0) as u64;
+            let scaled = Self::scale_to_u64(loss, 1000.0);
             Self::push_bounded(&mut self.training.loss_history, scaled, capacity);
         }
 
         if let Some(lr) = m.learning_rate {
-            let scaled = (lr * 1_000_000.0) as u64;
+            let scaled = Self::scale_to_u64(lr, 1_000_000.0);
             Self::push_bounded(&mut self.training.lr_history, scaled, capacity);
         }
 
@@ -142,7 +142,7 @@ impl App {
         }
 
         if let Some(throughput) = m.throughput {
-            let scaled = throughput as u64;
+            let scaled = Self::scale_to_u64(throughput, 1.0);
             Self::push_bounded(&mut self.training.throughput_history, scaled, capacity);
         }
 
@@ -159,14 +159,14 @@ impl App {
 
         self.system.latest = Some(s.clone());
 
-        let cpu_scaled = (s.cpu_usage_percent() * 100.0) as u64;
+        let cpu_scaled = Self::scale_to_u64(s.cpu_usage_percent(), 100.0);
         Self::push_bounded(&mut self.system.cpu_history, cpu_scaled, capacity);
 
-        let ram_scaled = (s.memory_usage_percent() * 100.0) as u64;
+        let ram_scaled = Self::scale_to_u64(s.memory_usage_percent(), 100.0);
         Self::push_bounded(&mut self.system.ram_history, ram_scaled, capacity);
 
         if s.has_gpu() && !s.gpus.is_empty() {
-            let gpu_scaled = (s.gpus[0].utilization * 100.0) as u64;
+            let gpu_scaled = Self::scale_to_u64(s.gpus[0].utilization, 100.0);
             Self::push_bounded(&mut self.system.gpu_history, gpu_scaled, capacity);
         }
     }
@@ -183,6 +183,15 @@ impl App {
         if buf.len() > capacity {
             buf.pop_front();
         }
+    }
+
+    fn scale_to_u64(value: f64, factor: f64) -> u64 {
+        if !value.is_finite() || value <= 0.0 || !factor.is_finite() || factor <= 0.0 {
+            return 0;
+        }
+
+        let clamped = value.clamp(0.0, f64::MAX / factor);
+        (clamped * factor) as u64
     }
 }
 
