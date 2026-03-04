@@ -228,16 +228,11 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App::new(Config::default());
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            terminal
-                .draw(|frame| {
-                    render(frame, &app);
-                })
-                .unwrap();
-        }));
-        // It will panic because of todo!() in dashboard::render, which is fine,
-        // we just want to ensure it doesn't panic on the layout part.
-        assert!(res.is_err());
+        terminal
+            .draw(|frame| {
+                render(frame, &app);
+            })
+            .unwrap();
     }
 
     #[test]

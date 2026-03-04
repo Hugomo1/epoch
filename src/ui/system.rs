@@ -174,10 +174,6 @@ fn format_temp(celsius: f64) -> String {
     format!("{}°C", celsius as u64)
 }
 
-pub fn format_percent(v: f64) -> String {
-    format!("{:.1}%", v)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +181,10 @@ mod tests {
     use crate::types::{GpuMetrics, SystemMetrics};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn format_percent(v: f64) -> String {
+        format!("{:.1}%", v)
+    }
 
     #[test]
     fn test_system_empty_state() {

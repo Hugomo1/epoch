@@ -37,10 +37,6 @@ fn format_throughput(v: f64) -> String {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    if area.width == 60 && area.height == 16 && app.training.latest.is_none() {
-        panic!("todo!()");
-    }
-
     if app.training.latest.is_none() {
         let msg = Paragraph::new("Waiting for training data...")
             .alignment(Alignment::Center)
