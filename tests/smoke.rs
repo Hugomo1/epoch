@@ -1,11 +1,13 @@
 use epoch::app::App;
 use epoch::config::Config;
 use epoch::types::{GpuMetrics, SystemMetrics};
+use epoch::ui::Tab;
 
 #[test]
 fn test_app_new_running() {
     let app = App::new(Config::default());
     assert!(app.running);
+    assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
 }
 
 #[test]
