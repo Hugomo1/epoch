@@ -1,44 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
-use ratatui::symbols::Marker;
-use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 
 use crate::app::App;
+use crate::ui::graph::render_line_graph;
 use crate::ui::theme::resolve_palette_from_config;
-
-fn render_line_graph(
-    frame: &mut Frame,
-    area: Rect,
-    block: Block,
-    name: &str,
-    series: &[u64],
-    color: Color,
-) {
-    let points = series
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| (idx as f64, *value as f64))
-        .collect::<Vec<_>>();
-    let max_y = points
-        .iter()
-        .map(|(_, y)| *y)
-        .fold(1.0_f64, |acc, y| acc.max(y));
-    let max_x = points.len().saturating_sub(1) as f64;
-
-    let dataset = Dataset::default()
-        .name(name)
-        .graph_type(GraphType::Line)
-        .marker(Marker::Dot)
-        .style(Style::default().fg(color))
-        .data(&points);
-
-    let chart = Chart::new(vec![dataset])
-        .block(block)
-        .x_axis(Axis::default().bounds([0.0, max_x.max(1.0)]))
-        .y_axis(Axis::default().bounds([0.0, max_y]));
-    frame.render_widget(chart, area);
-}
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = resolve_palette_from_config(&app.config);
@@ -128,14 +95,42 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
 
+    let system_line = if let Some(system) = app.system.latest.as_ref() {
+        let mem_pct = system.memory_usage_percent();
+        let gpu_pct = if system.gpus.is_empty() {
+            "n/a".to_string()
+        } else {
+            format!(
+                "{:.1}%",
+                system.gpus.iter().map(|g| g.utilization).sum::<f64>() / system.gpus.len() as f64
+            )
+        };
+        format!(
+            "CPU/RAM/GPU: {:.1}% / {:.1}% / {gpu_pct}",
+            system.cpu_usage, mem_pct
+        )
+    } else {
+        "CPU/RAM/GPU: n/a".to_string()
+    };
+
+    let alert_line = if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
+        "Alerts: none".to_string()
+    } else {
+        let active = app.alerts.active.len();
+        let resolved = app.alerts.resolved.len();
+        format!("Alerts active/resolved: {active}/{resolved}")
+    };
+
     let summary = Paragraph::new(format!(
-        "Perplexity: {}\nLoss spikes: {}\nNaN/Inf count: {}\nParser ok/skip/err: {}/{}/{}\n\nLast loss spike: {}\nLast NaN/Inf: {}\nParser mode: {}\nHealth: {}",
+        "Perplexity: {}\nLoss spikes: {}\nNaN/Inf count: {}\nParser ok/skip/err: {}/{}/{}\n{}\n{}\n\nLast loss spike: {}\nLast NaN/Inf: {}\nParser mode: {}\nHealth: {}",
         latest_or_dash(app.training.perplexity_latest, 3),
         app.training.loss_spike_count,
         app.training.nan_inf_count,
         app.training.parser_success_count,
         app.training.parser_skipped_count,
         app.training.parser_error_count,
+        system_line,
+        alert_line,
         anomaly_age(app.training.last_loss_spike_at),
         anomaly_age(app.training.last_nan_inf_at),
         app.config.parser,
@@ -211,5 +206,78 @@ fn anomaly_age(ts: Option<std::time::Instant>) -> String {
     match ts {
         Some(t) => format!("{}s ago", t.elapsed().as_secs()),
         None => "never".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::config::Config;
+    use crate::types::TrainingMetrics;
+
+    #[test]
+    fn test_advanced_chart_bounds_match_metrics_contract() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+
+        for i in 0..80 {
+            app.push_metrics(TrainingMetrics {
+                eval_loss: Some((i % 7) as f64 * 0.3),
+                grad_norm: Some((i % 5) as f64 * 0.7),
+                loss: Some(0.5),
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        app.config.graph_mode = "line".to_string();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        }));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_diagnostics_shows_active_and_resolved_alerts() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.5),
+            step: Some(1),
+            ..TrainingMetrics::default()
+        });
+        app.alerts.active.push(crate::app::AlertRecord {
+            rule_id: "memory_pressure".to_string(),
+            level: crate::app::AlertLevel::Warning,
+            value: 80.0,
+            message: "memory_pressure: warning at 80.000".to_string(),
+            tick: 1,
+        });
+        app.alerts.resolved.push(crate::app::AlertRecord {
+            rule_id: "throughput_drop".to_string(),
+            level: crate::app::AlertLevel::Critical,
+            value: 10.0,
+            message: "resolved at 10.000".to_string(),
+            tick: 2,
+        });
+
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Alerts active/resolved: 1/1"));
     }
 }

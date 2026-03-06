@@ -105,4 +105,40 @@ mod tests {
 
         assert!(content.contains("Custom Action"));
     }
+
+    #[test]
+    fn test_help_overlay_matches_runtime_keymap_contract() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal should be created");
+        let mut app = App::new(Config::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+        let state = match &app.ui_state.mode {
+            crate::app::AppMode::Help(state) => state,
+            _ => panic!("expected help mode"),
+        };
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), state))
+            .expect("render should succeed");
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .expect("cell should exist")
+                            .symbol()
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("1/2 (3/4 legacy)"));
+        assert!(content.contains("- / ="));
+    }
 }

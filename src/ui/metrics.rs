@@ -3,10 +3,10 @@ use std::collections::VecDeque;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::symbols::Marker;
-use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline};
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 
 use crate::app::{App, DataHealthState};
+use crate::ui::graph::render_line_graph;
 use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -68,10 +68,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         render_line_graph(
             frame,
             chunks[0],
+            loss_block,
             "Loss",
             &loss_history,
             palette.loss_color,
-            loss_block,
         );
     } else {
         let sparkline = Sparkline::default()
@@ -104,10 +104,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         render_line_graph(
             frame,
             chunks[1],
+            lr_block,
             "Learning Rate",
             &lr_history,
             palette.lr_color,
-            lr_block,
         );
     } else {
         let sparkline = Sparkline::default()
@@ -189,7 +189,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         rates_line.join(" | ")
     };
 
-    let points_text = format!(
+    let mut points_lines = vec![format!(
         "{}\nTokens: {} | Eval: {} | Grad: {}\nSpikes: {} | NaN/Inf: {}",
         rates_text,
         latest
@@ -200,7 +200,23 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         format_optional_float(latest.grad_norm, 3),
         app.training.loss_spike_count,
         app.training.nan_inf_count
-    );
+    )];
+
+    if app.run_comparison.snapshot_mode {
+        let loss_delta = app
+            .run_compare_latest_loss_delta()
+            .map(|v| format!("{v:+.4}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let lr_delta = app
+            .run_compare_latest_lr_delta()
+            .map(|v| format!("{v:+.2e}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        points_lines.push(format!(
+            "Compare Loss Δ: {loss_delta} | Compare LR Δ: {lr_delta}"
+        ));
+    }
+
+    let points_text = points_lines.join("\n");
     let points_block = Block::default().title("Signals").borders(Borders::ALL);
     let points_para = Paragraph::new(points_text)
         .style(
@@ -265,39 +281,6 @@ fn format_optional_float(value: Option<f64>, decimals: usize) -> String {
         Some(v) => format!("{v:.decimals$}"),
         None => "—".to_string(),
     }
-}
-
-fn render_line_graph(
-    frame: &mut Frame,
-    area: Rect,
-    name: &str,
-    series: &[u64],
-    color: ratatui::style::Color,
-    block: Block,
-) {
-    let points = series
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| (idx as f64, *value as f64))
-        .collect::<Vec<_>>();
-    let max_y = points
-        .iter()
-        .map(|(_, y)| *y)
-        .fold(1.0_f64, |acc, y| acc.max(y));
-    let max_x = points.len().saturating_sub(1) as f64;
-
-    let dataset = Dataset::default()
-        .name(name)
-        .graph_type(GraphType::Line)
-        .marker(Marker::Dot)
-        .style(Style::default().fg(color))
-        .data(&points);
-
-    let chart = Chart::new(vec![dataset])
-        .block(block)
-        .x_axis(Axis::default().bounds([0.0, max_x.max(1.0)]))
-        .y_axis(Axis::default().bounds([0.0, max_y]));
-    frame.render_widget(chart, area);
 }
 
 #[cfg(test)]
@@ -525,5 +508,57 @@ mod tests {
             terminal.draw(|f| render(f, f.area(), &app)).unwrap();
         }));
         assert!(line_render.is_ok());
+    }
+
+    #[test]
+    fn test_metrics_chart_uses_shared_graph_contract() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+
+        for i in 0..80 {
+            app.push_metrics(TrainingMetrics {
+                loss: Some((i % 10) as f64 * 0.1),
+                learning_rate: Some(1e-4),
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        app.config.graph_mode = "line".to_string();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        }));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_run_compare_marks_non_comparable_metrics() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.42),
+            step: Some(1),
+            ..TrainingMetrics::default()
+        });
+        app.set_run_comparison_snapshot(vec![TrainingMetrics {
+            step: Some(1),
+            ..TrainingMetrics::default()
+        }]);
+
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Compare Loss Δ: n/a") || content.contains("Compare LR Δ: n/a"));
     }
 }
