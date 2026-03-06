@@ -24,7 +24,56 @@ pub struct CustomTheme {
     pub lr_color: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertRuleKind {
+    LossTrendWorsening,
+    ThroughputDrop,
+    MemoryPressure,
+}
+
+impl AlertRuleKind {
+    pub fn as_id(&self) -> &'static str {
+        match self {
+            Self::LossTrendWorsening => "loss_trend_worsening",
+            Self::ThroughputDrop => "throughput_drop",
+            Self::MemoryPressure => "memory_pressure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AlertEvalMode {
+    Current,
+    RollingMean { window: usize },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct AlertRuleConfig {
+    pub id: Option<String>,
+    pub kind: AlertRuleKind,
+    pub mode: AlertEvalMode,
+    pub warning: f64,
+    pub critical: f64,
+    pub enabled: bool,
+}
+
+impl Default for AlertRuleConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 0.0,
+            critical: 0.0,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     pub tick_rate_ms: u64,
@@ -39,6 +88,8 @@ pub struct Config {
     pub keymap_profile: String,
     pub profile_target: String,
     pub custom_theme: Option<CustomTheme>,
+    pub alert_rules: Vec<AlertRuleConfig>,
+    pub run_comparison_file: Option<PathBuf>,
     pub regex_pattern: Option<String>,
     pub log_file: Option<PathBuf>,
     pub stdin_mode: bool,
@@ -59,6 +110,8 @@ struct ConfigPartial {
     keymap_profile: Option<String>,
     profile_target: Option<String>,
     custom_theme: Option<Option<CustomTheme>>,
+    alert_rules: Option<Vec<AlertRuleConfig>>,
+    run_comparison_file: Option<Option<PathBuf>>,
     regex_pattern: Option<Option<String>>,
     log_file: Option<Option<PathBuf>>,
     stdin_mode: Option<bool>,
@@ -79,6 +132,8 @@ impl Default for Config {
             keymap_profile: "default".to_string(),
             profile_target: "global".to_string(),
             custom_theme: None,
+            alert_rules: Vec::new(),
+            run_comparison_file: None,
             regex_pattern: None,
             log_file: None,
             stdin_mode: false,
@@ -144,6 +199,12 @@ impl Config {
         }
         if let Some(v) = partial.custom_theme {
             self.custom_theme = v;
+        }
+        if let Some(v) = partial.alert_rules {
+            self.alert_rules = v;
+        }
+        if let Some(v) = partial.run_comparison_file {
+            self.run_comparison_file = v;
         }
         if let Some(v) = partial.regex_pattern {
             self.regex_pattern = v;
@@ -694,5 +755,15 @@ history_size = 777
         // Config::load should not error if config file doesn't exist
         let config = Config::load().unwrap();
         assert_eq!(config.tick_rate_ms, 250);
+    }
+
+    #[test]
+    fn test_readme_documented_release_keys_exist() {
+        let readme = std::fs::read_to_string("README.md").expect("README should exist");
+        assert!(readme.contains("1/2 (3/4 legacy)"));
+        assert!(readme.contains("Main / Diagnostics"));
+        assert!(readme.contains("[[alert_rules]]"));
+        assert!(readme.contains("kind = \"throughput_drop\""));
+        assert!(readme.contains("run_comparison_file"));
     }
 }

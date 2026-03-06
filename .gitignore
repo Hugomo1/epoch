@@ -1,6 +1,5 @@
 /target
 .sisyphus/
-AGENTS.md
 .opencode/
 .claude/
 .cursor/
@@ -11,3 +10,5 @@ AGENTS.md
 demo_stream.py
 demo.jsonl
 TODO.md
+AGENTS.md
+PRODUCT_SPEC.md
