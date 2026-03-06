@@ -40,7 +40,8 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let mut config = epoch::config::Config::load()?;
+    let project_root = std::env::current_dir().ok();
+    let mut config = epoch::config::Config::load_effective(project_root.as_deref())?;
     config.merge_cli_args(cli.log_file, cli.stdin, cli.parser);
 
     setup_tracing();
@@ -64,8 +65,9 @@ async fn main() -> Result<()> {
 
         if matches!(app.ui_state.mode, epoch::app::AppMode::Scanning) {
             let discovered = run_scanning_mode(&mut terminal, &mut app, &mut event_rx).await?;
-            app.ui_state.mode =
-                epoch::app::AppMode::FilePicker(epoch::app::FilePickerState::new(discovered));
+            app.ui_state.mode = epoch::app::AppMode::FilePicker(
+                epoch::app::FilePickerState::new_for_keymap(discovered, &config.keymap_profile),
+            );
         }
 
         if !matches!(app.ui_state.mode, epoch::app::AppMode::Monitoring) {

@@ -3,20 +3,20 @@ use std::collections::VecDeque;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Sparkline};
 
 use crate::app::{App, DataHealthState};
-use crate::ui::{
-    HEADER_FG, LOSS_COLOR, LR_COLOR, MUTED, SUCCESS, WARNING, metric_label_style,
-    metric_value_style,
-};
+use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = resolve_palette_from_config(&app.config);
+
     if app.training.latest.is_none() {
         let text = "No training metrics received yet.\nStart a training run and pipe output via --stdin or --log-file";
         let paragraph = Paragraph::new(text)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED));
+            .style(Style::default().fg(palette.muted));
 
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -34,10 +34,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Min(0),
+            Constraint::Length(8),
+            Constraint::Length(6),
         ])
         .split(area);
 
@@ -45,7 +44,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    // 1. Loss Sparkline
     let sparkline_width = usize::from(chunks[0].width.saturating_sub(2).max(1));
     let loss_history = app.training_viewport_series(&app.training.loss_history, sparkline_width);
     let current_loss = latest.loss.unwrap_or(0.0);
@@ -55,22 +53,34 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let loss_block = Block::default()
         .borders(Borders::ALL)
         .title(loss_title)
-        .title_style(metric_label_style());
+        .title_style(
+            Style::default()
+                .fg(palette.header_fg)
+                .add_modifier(Modifier::BOLD),
+        );
 
     if loss_history.is_empty() {
         let para = Paragraph::new("No loss data")
             .block(loss_block)
-            .style(Style::default().fg(MUTED));
+            .style(Style::default().fg(palette.muted));
         frame.render_widget(para, chunks[0]);
+    } else if app.config.graph_mode == "line" {
+        render_line_graph(
+            frame,
+            chunks[0],
+            "Loss",
+            &loss_history,
+            palette.loss_color,
+            loss_block,
+        );
     } else {
         let sparkline = Sparkline::default()
             .block(loss_block)
             .data(&loss_history)
-            .style(Style::default().fg(LOSS_COLOR));
+            .style(Style::default().fg(palette.loss_color));
         frame.render_widget(sparkline, chunks[0]);
     }
 
-    // 2. Learning Rate Sparkline
     let lr_sparkline_width = usize::from(chunks[1].width.saturating_sub(2).max(1));
     let lr_history = app.training_viewport_series(&app.training.lr_history, lr_sparkline_width);
     let current_lr = latest.learning_rate.unwrap_or(0.0);
@@ -79,67 +89,38 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let lr_block = Block::default()
         .borders(Borders::ALL)
         .title(lr_title)
-        .title_style(metric_label_style());
+        .title_style(
+            Style::default()
+                .fg(palette.header_fg)
+                .add_modifier(Modifier::BOLD),
+        );
 
     if lr_history.is_empty() {
         let para = Paragraph::new("No LR data")
             .block(lr_block)
-            .style(Style::default().fg(MUTED));
+            .style(Style::default().fg(palette.muted));
         frame.render_widget(para, chunks[1]);
+    } else if app.config.graph_mode == "line" {
+        render_line_graph(
+            frame,
+            chunks[1],
+            "Learning Rate",
+            &lr_history,
+            palette.lr_color,
+            lr_block,
+        );
     } else {
         let sparkline = Sparkline::default()
             .block(lr_block)
             .data(&lr_history)
-            .style(Style::default().fg(LR_COLOR));
+            .style(Style::default().fg(palette.lr_color));
         frame.render_widget(sparkline, chunks[1]);
     }
 
-    // 3. Stats Row
-    let stats_chunks = Layout::default()
+    let summary_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
-
-    let current_step = latest.step.unwrap_or(0);
-    let step_text = if app.training.total_steps > 0 && latest.step.is_some() {
-        format!(
-            "Step: {} / {}",
-            format_step(current_step),
-            format_step(app.training.total_steps)
-        )
-    } else {
-        format!("Step: {}", format_step(current_step))
-    };
-
-    let throughput_text = format!(
-        "Tokens/s: {}\nSamples/s: {}\nSteps/s: {}",
-        format_optional_float(latest.tokens_per_second, 1),
-        format_optional_float(latest.samples_per_second, 1),
-        format_optional_float(latest.steps_per_second, 3)
-    );
-
-    let step_block = Block::default().borders(Borders::ALL);
-    let step_para = Paragraph::new(step_text)
-        .style(metric_value_style())
-        .block(step_block);
-
-    let throughput_block = Block::default().borders(Borders::ALL).title("Throughput");
-    let throughput_para = Paragraph::new(throughput_text)
-        .style(metric_value_style())
-        .block(throughput_block);
-
-    frame.render_widget(step_para, stats_chunks[0]);
-    frame.render_widget(throughput_para, stats_chunks[1]);
-
-    // 4. Summary Row
-    let summary_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-        ])
-        .split(chunks[3]);
 
     let elapsed = app.elapsed();
     let time_text = if app.training.start_time.is_some() {
@@ -152,28 +133,65 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let (status_text, status_color) = match app.training_data_health_state() {
-        DataHealthState::Live => (DataHealthState::Live.label(), SUCCESS),
-        DataHealthState::Stale => (DataHealthState::Stale.label(), WARNING),
-        DataHealthState::NoData => (DataHealthState::NoData.label(), MUTED),
+        DataHealthState::Live => (DataHealthState::Live.label(), palette.success),
+        DataHealthState::Stale => (DataHealthState::Stale.label(), palette.warning),
+        DataHealthState::NoData => (DataHealthState::NoData.label(), palette.muted),
     };
 
-    let time_block = Block::default().borders(Borders::ALL);
-    let time_para = Paragraph::new(time_text)
-        .style(Style::default().fg(HEADER_FG))
-        .block(time_block);
-
-    let status_block = Block::default().borders(Borders::ALL);
-    let status_para = Paragraph::new(status_text)
-        .style(
-            Style::default()
-                .fg(status_color)
-                .add_modifier(Modifier::BOLD),
+    let current_step = latest.step.unwrap_or(0);
+    let step_text = if app.training.total_steps > 0 && latest.step.is_some() {
+        format!(
+            "Step: {} / {}",
+            format_step(current_step),
+            format_step(app.training.total_steps)
         )
-        .alignment(Alignment::Center)
-        .block(status_block);
+    } else {
+        format!("Step: {}", format_step(current_step))
+    };
+
+    let core_text = format!(
+        "{step_text}\nThroughput: {}\nRunning: {time_text}\nStatus: {status_text}",
+        format_optional_float(latest.throughput, 1),
+    );
+    let core_block = Block::default().title("Core").borders(Borders::ALL);
+    let core_para = Paragraph::new(core_text)
+        .style(Style::default().fg(palette.accent))
+        .block(core_block);
+
+    let rate_items = [
+        (
+            "tokens_per_second",
+            "Tokens/s",
+            format_optional_float(latest.tokens_per_second, 1),
+            latest.tokens_per_second.is_some(),
+        ),
+        (
+            "samples_per_second",
+            "Samples/s",
+            format_optional_float(latest.samples_per_second, 1),
+            latest.samples_per_second.is_some(),
+        ),
+        (
+            "steps_per_second",
+            "Steps/s",
+            format_optional_float(latest.steps_per_second, 3),
+            latest.steps_per_second.is_some(),
+        ),
+    ];
+    let rates_line = rate_items
+        .iter()
+        .filter(|(id, _, _, present)| app.should_show_metric_panel(id, *present))
+        .map(|(_, label, value, _)| format!("{label}: {value}"))
+        .collect::<Vec<_>>();
+    let rates_text = if rates_line.is_empty() {
+        "Rates: —".to_string()
+    } else {
+        rates_line.join(" | ")
+    };
 
     let points_text = format!(
-        "Tokens: {} | Eval: {} | Grad: {} | Spikes: {} | NaN/Inf: {}",
+        "{}\nTokens: {} | Eval: {} | Grad: {}\nSpikes: {} | NaN/Inf: {}",
+        rates_text,
         latest
             .tokens
             .map(|v| v.to_string())
@@ -183,15 +201,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         app.training.loss_spike_count,
         app.training.nan_inf_count
     );
-    let points_block = Block::default().borders(Borders::ALL);
+    let points_block = Block::default().title("Signals").borders(Borders::ALL);
     let points_para = Paragraph::new(points_text)
-        .style(Style::default().fg(MUTED))
-        .alignment(Alignment::Right)
+        .style(
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(points_block);
 
-    frame.render_widget(time_para, summary_chunks[0]);
-    frame.render_widget(status_para, summary_chunks[1]);
-    frame.render_widget(points_para, summary_chunks[2]);
+    frame.render_widget(
+        core_para.style(Style::default().fg(status_color)),
+        summary_chunks[0],
+    );
+    frame.render_widget(points_para, summary_chunks[1]);
 }
 
 fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
@@ -242,6 +265,39 @@ fn format_optional_float(value: Option<f64>, decimals: usize) -> String {
         Some(v) => format!("{v:.decimals$}"),
         None => "—".to_string(),
     }
+}
+
+fn render_line_graph(
+    frame: &mut Frame,
+    area: Rect,
+    name: &str,
+    series: &[u64],
+    color: ratatui::style::Color,
+    block: Block,
+) {
+    let points = series
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| (idx as f64, *value as f64))
+        .collect::<Vec<_>>();
+    let max_y = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(1.0_f64, |acc, y| acc.max(y));
+    let max_x = points.len().saturating_sub(1) as f64;
+
+    let dataset = Dataset::default()
+        .name(name)
+        .graph_type(GraphType::Line)
+        .marker(Marker::Dot)
+        .style(Style::default().fg(color))
+        .data(&points);
+
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(Axis::default().bounds([0.0, max_x.max(1.0)]))
+        .y_axis(Axis::default().bounds([0.0, max_y]));
+    frame.render_widget(chart, area);
 }
 
 #[cfg(test)]
@@ -444,5 +500,30 @@ mod tests {
         assert!(content.contains("Tokens/s: 1500.0"));
         assert!(content.contains("Samples/s: 25.0"));
         assert!(content.contains("Steps/s: 0.500"));
+    }
+
+    #[test]
+    fn test_graph_mode_switch_between_line_and_sparkline() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.42),
+            learning_rate: Some(1e-4),
+            step: Some(12),
+            ..TrainingMetrics::default()
+        });
+
+        app.config.graph_mode = "sparkline".to_string();
+        let sparkline_render = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        }));
+        assert!(sparkline_render.is_ok());
+
+        app.config.graph_mode = "line".to_string();
+        let line_render = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        }));
+        assert!(line_render.is_ok());
     }
 }

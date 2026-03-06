@@ -2,13 +2,17 @@ pub mod advanced;
 pub mod dashboard;
 pub mod file_picker;
 pub mod header;
+pub mod help;
 pub mod metrics;
+pub mod settings;
 pub mod system;
+pub mod theme;
 
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::app::{App, AppMode};
+use crate::ui::theme::resolve_palette_from_config;
 
 // Base palette — dark terminal friendly
 pub const HEADER_BG: Color = Color::Rgb(30, 30, 46);
@@ -94,9 +98,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     match &app.ui_state.mode {
         AppMode::Scanning => {
-            file_picker::render_scanning(frame, content_area, app.ui_state.scanning_frame)
+            file_picker::render_scanning(frame, content_area, app.ui_state.scanning_frame, app)
         }
-        AppMode::FilePicker(state) => file_picker::render_picker(frame, content_area, state),
+        AppMode::FilePicker(state) => file_picker::render_picker(frame, content_area, state, app),
+        AppMode::Help(state) => help::render(frame, content_area, state),
+        AppMode::Settings(state) => settings::render(frame, content_area, state),
         AppMode::Monitoring => match app.ui_state.selected_tab {
             Tab::Dashboard => dashboard::render(frame, content_area, app),
             Tab::Metrics => metrics::render(frame, content_area, app),
@@ -110,6 +116,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let palette = resolve_palette_from_config(&app.config);
     let status = if app.running { "Running" } else { "Stopped" };
     let data_health = app.training_data_health_state();
     let data_status = data_health.label();
@@ -122,20 +129,54 @@ fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
     let hours = elapsed.as_secs() / 3600;
     let minutes = (elapsed.as_secs() % 3600) / 60;
     let seconds = elapsed.as_secs() % 60;
+    let key_hints = match &app.ui_state.mode {
+        AppMode::Monitoring => "?:help s:settings Tab:tabs Space:live/pause q:quit",
+        AppMode::Settings(_) => {
+            "?:help Up/Down:row Left/Right:change a:apply w/Enter:save Esc:cancel"
+        }
+        AppMode::Help(_) => "?:close Esc:close",
+        AppMode::FilePicker(state) => {
+            if app.config.keymap_profile == "vim" {
+                match state.input_mode {
+                    crate::app::FilePickerInputMode::Insert => {
+                        "Picker[INSERT] Esc:normal Type:filter Enter:open q:quit"
+                    }
+                    crate::app::FilePickerInputMode::Normal => {
+                        "Picker[NORMAL] i:insert j/k:select Enter:open Esc/q:quit"
+                    }
+                }
+            } else {
+                "Type:filter Up/Down:select Enter:open Esc:quit"
+            }
+        }
+        AppMode::Scanning => "Scanning files...",
+    };
 
     let text = format!(
-        " [{}] | {} | Data: {} | Elapsed: {:02}:{:02}:{:02} | q to quit",
-        status, viewport_status, data_status, hours, minutes, seconds
+        " [{}] | {} | Parser: {} | Keymap: {} | Data: {} | Elapsed: {:02}:{:02}:{:02} | {}",
+        status,
+        viewport_status,
+        app.config.parser,
+        app.config.keymap_profile,
+        data_status,
+        hours,
+        minutes,
+        seconds,
+        key_hints
     );
 
-    let paragraph = ratatui::widgets::Paragraph::new(text)
-        .style(ratatui::style::Style::default().fg(HEADER_FG).bg(HEADER_BG));
+    let paragraph = ratatui::widgets::Paragraph::new(text).style(
+        ratatui::style::Style::default()
+            .fg(palette.header_fg)
+            .bg(palette.header_bg),
+    );
     frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::palette_for_name;
     use strum::IntoEnumIterator;
 
     #[test]
@@ -233,6 +274,27 @@ mod tests {
         let _ = LR_COLOR;
     }
 
+    #[test]
+    fn test_theme_registry_contains_required_presets() {
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"classic"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"catppuccin"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"github"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"nord"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"gruvbox"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"solarized"));
+        assert!(crate::ui::theme::BUILTIN_THEMES.contains(&"dracula"));
+    }
+
+    #[test]
+    fn test_default_theme_matches_legacy_classic_palette() {
+        let palette = palette_for_name("classic");
+        assert_eq!(palette.header_bg, HEADER_BG);
+        assert_eq!(palette.header_fg, HEADER_FG);
+        assert_eq!(palette.accent, ACCENT);
+        assert_eq!(palette.loss_color, LOSS_COLOR);
+        assert_eq!(palette.lr_color, LR_COLOR);
+    }
+
     use crate::config::Config;
     use crate::types::TrainingMetrics;
     use ratatui::Terminal;
@@ -307,6 +369,109 @@ mod tests {
     }
 
     #[test]
+    fn test_status_bar_includes_parser_mode() {
+        let backend = TestBackend::new(100, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.config.parser = "auto".to_string();
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Parser: auto"));
+    }
+
+    #[test]
+    fn test_status_bar_shows_active_keymap_profile() {
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.config.keymap_profile = "vim".to_string();
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Keymap: vim"));
+    }
+
+    #[test]
+    fn test_status_bar_shows_help_gateway_hint() {
+        let backend = TestBackend::new(180, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(Config::default());
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("?:help"));
+    }
+
+    #[test]
+    fn test_runtime_theme_switch_updates_render_styles() {
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+
+        app.config.theme = "classic".to_string();
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+        let classic_cell = terminal.backend().buffer().cell((0, 0)).unwrap().clone();
+
+        app.config.theme = "nord".to_string();
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+        let nord_cell = terminal.backend().buffer().cell((0, 0)).unwrap().clone();
+
+        assert_ne!(classic_cell.bg, nord_cell.bg);
+        assert_ne!(classic_cell.fg, nord_cell.fg);
+    }
+
+    #[test]
     fn test_status_health_state_uses_shared_logic() {
         use crate::app::DataHealthState;
 
@@ -353,6 +518,7 @@ mod tests {
         assert!(content.contains("Stability Summary"));
         assert!(content.contains("Perplexity"));
         assert!(content.contains("Loss spikes"));
+        assert!(content.contains("Parser ok/skip/err"));
     }
 
     #[test]
@@ -387,5 +553,29 @@ mod tests {
         assert!(content.contains("samples/s (dataloader)"));
         assert!(content.contains("Steps/s"));
         assert!(content.contains("steps/s (optimizer)"));
+    }
+
+    #[test]
+    fn test_advanced_graph_mode_switch_between_line_and_sparkline() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_tab = Tab::Advanced;
+
+        app.push_metrics(TrainingMetrics {
+            eval_loss: Some(0.8),
+            grad_norm: Some(1.5),
+            tokens_per_second: Some(1400.0),
+            samples_per_second: Some(20.0),
+            steps_per_second: Some(0.4),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+
+        app.config.graph_mode = "sparkline".to_string();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        app.config.graph_mode = "line".to_string();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

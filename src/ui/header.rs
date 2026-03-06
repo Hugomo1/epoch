@@ -2,8 +2,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::app::App;
+use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = resolve_palette_from_config(&app.config);
+
     // Split header: top line for title, bottom 2 lines for tabs
     let [title_area, tabs_area] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(1),
@@ -20,25 +23,32 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ratatui::text::Span::styled(
             "Epoch",
             ratatui::style::Style::default()
-                .fg(crate::ui::ACCENT)
+                .fg(palette.accent)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
         ratatui::text::Span::raw(" "),
         ratatui::text::Span::styled(
             format!("{:02}:{:02}:{:02}", hours, minutes, seconds),
-            ratatui::style::Style::default().fg(crate::ui::MUTED),
+            ratatui::style::Style::default().fg(palette.muted),
         ),
     ]);
-    let title_paragraph =
-        ratatui::widgets::Paragraph::new(title_text).style(crate::ui::header_style());
+    let title_paragraph = ratatui::widgets::Paragraph::new(title_text).style(
+        ratatui::style::Style::default()
+            .fg(palette.header_fg)
+            .bg(palette.header_bg),
+    );
     frame.render_widget(title_paragraph, title_area);
 
     // Tab bar
     let tab_titles = vec!["Dashboard", "Metrics", "System", "Advanced"];
     let tabs = ratatui::widgets::Tabs::new(tab_titles)
         .select(app.ui_state.selected_tab as usize)
-        .highlight_style(crate::ui::tab_active_style())
-        .style(crate::ui::tab_inactive_style())
+        .highlight_style(
+            ratatui::style::Style::default()
+                .fg(palette.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )
+        .style(ratatui::style::Style::default().fg(palette.muted))
         .divider(ratatui::text::Span::raw(" | "));
     frame.render_widget(tabs, tabs_area);
 }

@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
+use crate::collectors::training::parser_telemetry_snapshot;
 use crate::config::Config;
 use crate::discovery::DiscoveredFile;
 use crate::event::Event;
@@ -25,15 +26,45 @@ pub struct TrainingState {
     pub samples_per_second_history: VecDeque<u64>,
     pub steps_per_second_history: VecDeque<u64>,
     pub tokens_per_second_history: VecDeque<u64>,
+    pub preferred_rate_metric: RateMetricPreference,
+    pub relevance_profile: RelevanceProfile,
     pub perplexity_latest: Option<f64>,
     pub loss_spike_count: u64,
     pub nan_inf_count: u64,
     pub last_loss_spike_at: Option<Instant>,
     pub last_nan_inf_at: Option<Instant>,
+    pub parser_success_count: u64,
+    pub parser_skipped_count: u64,
+    pub parser_error_count: u64,
     pub total_steps: u64,
     pub start_time: Option<Instant>,
     pub input_active: bool,
     pub last_data_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateMetricPreference {
+    TokensPerSecond,
+    SamplesPerSecond,
+    StepsPerSecond,
+    Throughput,
+}
+
+impl RateMetricPreference {
+    pub fn metric_id(self) -> &'static str {
+        match self {
+            Self::TokensPerSecond => "tokens_per_second",
+            Self::SamplesPerSecond => "samples_per_second",
+            Self::StepsPerSecond => "steps_per_second",
+            Self::Throughput => "throughput",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelevanceProfile {
+    TrainOnly,
+    EvalHeavy,
 }
 
 #[derive(Debug)]
@@ -93,6 +124,22 @@ pub enum AppMode {
     Scanning,
     FilePicker(FilePickerState),
     Monitoring,
+    Settings(Box<SettingsState>),
+    Help(Box<HelpState>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsState {
+    pub selected_row: usize,
+    pub draft: Config,
+    pub original: Config,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelpState {
+    pub entries: Vec<(String, String)>,
+    pub theme: String,
+    pub custom_theme: Option<crate::config::CustomTheme>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +148,13 @@ pub struct FilePickerState {
     pub query: String,
     pub filtered_indices: Vec<usize>,
     pub selected_index: usize,
+    pub input_mode: FilePickerInputMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilePickerInputMode {
+    Insert,
+    Normal,
 }
 
 #[derive(Clone)]
@@ -117,11 +171,20 @@ impl AsRef<str> for FuzzyCandidate {
 
 impl FilePickerState {
     pub fn new(files: Vec<DiscoveredFile>) -> Self {
+        Self::new_for_keymap(files, "default")
+    }
+
+    pub fn new_for_keymap(files: Vec<DiscoveredFile>, keymap_profile: &str) -> Self {
         Self {
             filtered_indices: (0..files.len()).collect(),
             files,
             query: String::new(),
             selected_index: 0,
+            input_mode: if keymap_profile == "vim" {
+                FilePickerInputMode::Normal
+            } else {
+                FilePickerInputMode::Insert
+            },
         }
     }
 
@@ -176,6 +239,191 @@ impl FilePickerState {
     }
 }
 
+impl SettingsState {
+    const ROW_PARSER: usize = 0;
+    const ROW_THEME: usize = 1;
+    const ROW_GRAPH_MODE: usize = 2;
+    const ROW_ADAPTIVE_LAYOUT: usize = 3;
+    const ROW_PINNED_RATE_METRIC: usize = 4;
+    const ROW_KEYMAP_PROFILE: usize = 5;
+    const ROW_PROFILE_TARGET: usize = 6;
+    const ROW_COUNT: usize = 7;
+
+    fn from_config(config: &Config) -> Self {
+        Self {
+            selected_row: 0,
+            draft: config.clone(),
+            original: config.clone(),
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected_row == 0 {
+            self.selected_row = Self::ROW_COUNT - 1;
+        } else {
+            self.selected_row -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        self.selected_row = (self.selected_row + 1) % Self::ROW_COUNT;
+    }
+
+    fn cycle_current(&mut self, delta: i8) {
+        match self.selected_row {
+            Self::ROW_PARSER => {
+                self.draft.parser = cycle_option(
+                    &self.draft.parser,
+                    &["auto", "jsonl", "csv", "regex", "tensorboard"],
+                    delta,
+                );
+            }
+            Self::ROW_THEME => {
+                self.draft.theme = cycle_option_normalized(
+                    &self.draft.theme,
+                    crate::ui::theme::SELECTABLE_THEMES,
+                    delta,
+                );
+            }
+            Self::ROW_GRAPH_MODE => {
+                self.draft.graph_mode =
+                    cycle_option(&self.draft.graph_mode, &["sparkline", "line"], delta);
+            }
+            Self::ROW_ADAPTIVE_LAYOUT => {
+                self.draft.adaptive_layout = !self.draft.adaptive_layout;
+            }
+            Self::ROW_PINNED_RATE_METRIC => {
+                let current = pinned_rate_preset_id(&self.draft.pinned_metrics);
+                let cycle_current = if current == "mixed" { "none" } else { current };
+                let next = cycle_option(
+                    cycle_current,
+                    &["none", "tokens", "samples", "steps", "all"],
+                    delta,
+                );
+                let mut next_pinned = self
+                    .draft
+                    .pinned_metrics
+                    .iter()
+                    .filter(|metric| !is_rate_metric(metric))
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                next_pinned.extend(
+                    pinned_rate_values_for_preset(&next)
+                        .iter()
+                        .map(|v| (*v).to_string()),
+                );
+                self.draft.pinned_metrics = next_pinned;
+            }
+            Self::ROW_KEYMAP_PROFILE => {
+                self.draft.keymap_profile =
+                    cycle_option(&self.draft.keymap_profile, &["default", "vim"], delta);
+            }
+            Self::ROW_PROFILE_TARGET => {
+                self.draft.profile_target =
+                    cycle_option(&self.draft.profile_target, &["global", "project"], delta);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl HelpState {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            entries: keymap_entries(&config.keymap_profile),
+            theme: config.theme.clone(),
+            custom_theme: config.custom_theme.clone(),
+        }
+    }
+}
+
+fn keymap_entries(profile: &str) -> Vec<(String, String)> {
+    let mut entries = vec![
+        ("q / Ctrl+C".to_string(), "Quit".to_string()),
+        ("Tab / Shift+Tab".to_string(), "Switch tab".to_string()),
+        ("1/2/3/4".to_string(), "Jump to tab".to_string()),
+        ("Space".to_string(), "Toggle live/pause".to_string()),
+        ("Left/Right".to_string(), "Pan history".to_string()),
+        ("- / =".to_string(), "Zoom out/in".to_string()),
+        ("g".to_string(), "Reset viewport to live".to_string()),
+        ("s".to_string(), "Open settings".to_string()),
+        ("?".to_string(), "Toggle help overlay".to_string()),
+    ];
+
+    if profile == "vim" {
+        entries.push(("h/j/k/l".to_string(), "Navigate (vim profile)".to_string()));
+        entries.push((
+            "Picker (vim): i".to_string(),
+            "Enter insert mode for query".to_string(),
+        ));
+        entries.push((
+            "Picker (vim): Esc".to_string(),
+            "Leave insert mode (normal Esc quits)".to_string(),
+        ));
+        entries.push((
+            "Picker (vim): j/k".to_string(),
+            "Move selection in normal mode".to_string(),
+        ));
+    }
+
+    entries
+}
+
+fn cycle_option(current: &str, options: &[&str], delta: i8) -> String {
+    let current_index = options.iter().position(|v| *v == current).unwrap_or(0) as isize;
+    let len = options.len() as isize;
+    let next = (current_index + delta as isize).rem_euclid(len) as usize;
+    options[next].to_string()
+}
+
+fn cycle_option_normalized(current: &str, options: &[&str], delta: i8) -> String {
+    let normalized = current.trim().to_ascii_lowercase();
+    let current_index = options
+        .iter()
+        .position(|v| v.eq_ignore_ascii_case(&normalized))
+        .unwrap_or(0) as isize;
+    let len = options.len() as isize;
+    let next = (current_index + delta as isize).rem_euclid(len) as usize;
+    options[next].to_string()
+}
+
+fn is_rate_metric(metric_id: &str) -> bool {
+    matches!(
+        metric_id,
+        "tokens_per_second" | "samples_per_second" | "steps_per_second"
+    )
+}
+
+fn pinned_rate_values_for_preset(preset: &str) -> &'static [&'static str] {
+    match preset {
+        "tokens" => &["tokens_per_second"],
+        "samples" => &["samples_per_second"],
+        "steps" => &["steps_per_second"],
+        "all" => &[
+            "tokens_per_second",
+            "samples_per_second",
+            "steps_per_second",
+        ],
+        _ => &[],
+    }
+}
+
+fn pinned_rate_preset_id(pinned_metrics: &[String]) -> &'static str {
+    let tokens = pinned_metrics.iter().any(|m| m == "tokens_per_second");
+    let samples = pinned_metrics.iter().any(|m| m == "samples_per_second");
+    let steps = pinned_metrics.iter().any(|m| m == "steps_per_second");
+
+    match (tokens, samples, steps) {
+        (false, false, false) => "none",
+        (true, false, false) => "tokens",
+        (false, true, false) => "samples",
+        (false, false, true) => "steps",
+        (true, true, true) => "all",
+        _ => "mixed",
+    }
+}
+
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
@@ -205,11 +453,16 @@ impl App {
                 samples_per_second_history: VecDeque::with_capacity(capacity),
                 steps_per_second_history: VecDeque::with_capacity(capacity),
                 tokens_per_second_history: VecDeque::with_capacity(capacity),
+                preferred_rate_metric: RateMetricPreference::Throughput,
+                relevance_profile: RelevanceProfile::TrainOnly,
                 perplexity_latest: None,
                 loss_spike_count: 0,
                 nan_inf_count: 0,
                 last_loss_spike_at: None,
                 last_nan_inf_at: None,
+                parser_success_count: 0,
+                parser_skipped_count: 0,
+                parser_error_count: 0,
                 total_steps: 0,
                 start_time: None,
                 input_active: false,
@@ -233,6 +486,28 @@ impl App {
         }
     }
 
+    pub fn should_show_metric_panel(&self, metric_id: &str, present: bool) -> bool {
+        if !self.config.adaptive_layout {
+            return true;
+        }
+        if self.config.pinned_metrics.iter().any(|p| p == metric_id) {
+            return true;
+        }
+        if self
+            .config
+            .hidden_metrics
+            .iter()
+            .any(|hidden| hidden == metric_id)
+        {
+            return false;
+        }
+        present
+    }
+
+    pub fn preferred_rate_metric_id(&self) -> &'static str {
+        self.training.preferred_rate_metric.metric_id()
+    }
+
     pub fn handle_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => self.handle_key(key),
@@ -244,6 +519,8 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        let is_help_key = matches!(key.code, KeyCode::Char('?'));
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.running = false;
@@ -257,11 +534,76 @@ impl App {
         }
 
         if let AppMode::FilePicker(ref mut picker) = self.ui_state.mode {
+            if self.config.keymap_profile == "vim" {
+                match picker.input_mode {
+                    FilePickerInputMode::Insert => match (key.code, key.modifiers) {
+                        (KeyCode::Esc, _) => {
+                            picker.input_mode = FilePickerInputMode::Normal;
+                        }
+                        (KeyCode::Backspace, _) => {
+                            picker.query.pop();
+                            picker.refresh_filter();
+                        }
+                        (KeyCode::Enter, _) => {
+                            if let Some(index) =
+                                picker.filtered_indices.get(picker.selected_index).copied()
+                            {
+                                self.ui_state.selected_file =
+                                    Some(picker.files[index].path.clone());
+                                self.ui_state.mode = AppMode::Monitoring;
+                            } else if !picker.query.trim().is_empty() {
+                                self.ui_state.selected_file =
+                                    Some(PathBuf::from(picker.query.clone()));
+                                self.ui_state.mode = AppMode::Monitoring;
+                            }
+                        }
+                        (KeyCode::Char(c), KeyModifiers::NONE) => {
+                            picker.query.push(c);
+                            picker.refresh_filter();
+                        }
+                        _ => {}
+                    },
+                    FilePickerInputMode::Normal => match (key.code, key.modifiers) {
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            picker.move_up();
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            picker.move_down();
+                        }
+                        (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                            picker.input_mode = FilePickerInputMode::Insert;
+                        }
+                        (KeyCode::Enter, _) => {
+                            if let Some(index) =
+                                picker.filtered_indices.get(picker.selected_index).copied()
+                            {
+                                self.ui_state.selected_file =
+                                    Some(picker.files[index].path.clone());
+                                self.ui_state.mode = AppMode::Monitoring;
+                            } else if !picker.query.trim().is_empty() {
+                                self.ui_state.selected_file =
+                                    Some(PathBuf::from(picker.query.clone()));
+                                self.ui_state.mode = AppMode::Monitoring;
+                            }
+                        }
+                        (KeyCode::Backspace, _) => {
+                            picker.query.pop();
+                            picker.refresh_filter();
+                        }
+                        (KeyCode::Esc, _) => {
+                            self.running = false;
+                        }
+                        _ => {}
+                    },
+                }
+                return;
+            }
+
             match (key.code, key.modifiers) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                (KeyCode::Up, _) => {
                     picker.move_up();
                 }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                (KeyCode::Down, _) => {
                     picker.move_down();
                 }
                 (KeyCode::Backspace, _) => {
@@ -290,7 +632,131 @@ impl App {
             return;
         }
 
+        if let AppMode::Help(_) = &self.ui_state.mode {
+            if matches!(key.code, KeyCode::Esc) || is_help_key {
+                self.ui_state.mode = AppMode::Monitoring;
+            }
+            return;
+        }
+
+        enum SettingsAction {
+            Apply,
+            Save,
+            Cancel,
+        }
+
+        let settings_action = if let AppMode::Settings(state) = &mut self.ui_state.mode {
+            let mut action = None;
+            match (key.code, key.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => state.move_up(),
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => state.move_down(),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    state.cycle_current(-1)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    state.cycle_current(1)
+                }
+                (KeyCode::Char('a'), KeyModifiers::NONE) => action = Some(SettingsAction::Apply),
+                (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
+                    action = Some(SettingsAction::Save)
+                }
+                (KeyCode::Esc, _) => action = Some(SettingsAction::Cancel),
+                _ => {}
+            }
+            action
+        } else {
+            None
+        };
+
+        if matches!(self.ui_state.mode, AppMode::Settings(_)) {
+            if let Some(action) = settings_action {
+                match action {
+                    SettingsAction::Apply => {
+                        if let AppMode::Settings(state) = &self.ui_state.mode {
+                            self.config = state.draft.clone();
+                            self.recompute_metric_relevance();
+                        }
+                    }
+                    SettingsAction::Save => {
+                        if let AppMode::Settings(state) = &self.ui_state.mode {
+                            self.config = state.draft.clone();
+                            self.recompute_metric_relevance();
+                            if self.config.profile_target == "project" {
+                                let project_root = self
+                                    .config
+                                    .log_file
+                                    .as_ref()
+                                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                                    .or_else(|| std::env::current_dir().ok());
+                                if let Some(root) = project_root
+                                    && let Err(err) = self.config.save_project(&root)
+                                {
+                                    tracing::debug!("failed to save project settings: {err}");
+                                }
+                            } else if let Err(err) = self.config.save_global() {
+                                tracing::debug!("failed to save global settings: {err}");
+                            }
+                        }
+                        self.ui_state.mode = AppMode::Monitoring;
+                    }
+                    SettingsAction::Cancel => {
+                        if let AppMode::Settings(state) = &self.ui_state.mode {
+                            self.config = state.original.clone();
+                            self.recompute_metric_relevance();
+                        }
+                        self.ui_state.mode = AppMode::Monitoring;
+                    }
+                }
+            }
+            return;
+        }
+
         match (key.code, key.modifiers) {
+            (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                self.ui_state.mode =
+                    AppMode::Settings(Box::new(SettingsState::from_config(&self.config)));
+            }
+            _ if is_help_key => {
+                self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
+            }
+            (KeyCode::Char('j'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
+                let current = self.ui_state.selected_tab as usize;
+                self.ui_state.selected_tab =
+                    Tab::from_repr((current + 1) % 4).unwrap_or(Tab::Dashboard);
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
+                let current = self.ui_state.selected_tab as usize;
+                self.ui_state.selected_tab =
+                    Tab::from_repr((current + 3) % 4).unwrap_or(Tab::Dashboard);
+            }
+            (KeyCode::Char('h'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
+                if !self.ui_state.training_viewport.follow_latest {
+                    self.ui_state.training_viewport.offset_samples = self
+                        .ui_state
+                        .training_viewport
+                        .offset_samples
+                        .saturating_add(Self::VIEWPORT_PAN_STEP);
+                }
+                if !self.ui_state.system_viewport.follow_latest {
+                    self.ui_state.system_viewport.offset_samples = self
+                        .ui_state
+                        .system_viewport
+                        .offset_samples
+                        .saturating_add(Self::VIEWPORT_PAN_STEP);
+                }
+            }
+            (KeyCode::Char('l'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
+                self.ui_state.training_viewport.offset_samples = self
+                    .ui_state
+                    .training_viewport
+                    .offset_samples
+                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                self.ui_state.system_viewport.offset_samples = self
+                    .ui_state
+                    .system_viewport
+                    .offset_samples
+                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
+            }
             (KeyCode::Tab, _) => {
                 let current = self.ui_state.selected_tab as usize;
                 self.ui_state.selected_tab =
@@ -381,6 +847,11 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        let parser_telemetry = parser_telemetry_snapshot();
+        self.training.parser_success_count = parser_telemetry.success_count;
+        self.training.parser_skipped_count = parser_telemetry.skipped_count;
+        self.training.parser_error_count = parser_telemetry.error_count;
+
         if matches!(self.ui_state.mode, AppMode::Scanning) {
             self.ui_state.scanning_frame = (self.ui_state.scanning_frame + 1) % 4;
         }
@@ -497,12 +968,43 @@ impl App {
             );
         }
 
+        self.recompute_metric_relevance();
+
         self.training.input_active = true;
         self.training.last_data_at = Some(Instant::now());
 
         if self.training.start_time.is_none() {
             self.training.start_time = Some(Instant::now());
         }
+    }
+
+    fn recompute_metric_relevance(&mut self) {
+        let latest = self.training.latest.as_ref();
+
+        let preferred = if latest.is_some_and(|m| m.tokens_per_second.is_some()) {
+            RateMetricPreference::TokensPerSecond
+        } else if latest.is_some_and(|m| m.samples_per_second.is_some()) {
+            RateMetricPreference::SamplesPerSecond
+        } else if latest.is_some_and(|m| m.steps_per_second.is_some()) {
+            RateMetricPreference::StepsPerSecond
+        } else if !self.training.tokens_per_second_history.is_empty() {
+            RateMetricPreference::TokensPerSecond
+        } else if !self.training.samples_per_second_history.is_empty() {
+            RateMetricPreference::SamplesPerSecond
+        } else if !self.training.steps_per_second_history.is_empty() {
+            RateMetricPreference::StepsPerSecond
+        } else {
+            RateMetricPreference::Throughput
+        };
+        self.training.preferred_rate_metric = preferred;
+
+        self.training.relevance_profile = if latest.is_some_and(|m| m.eval_loss.is_some())
+            || !self.training.eval_loss_history.is_empty()
+        {
+            RelevanceProfile::EvalHeavy
+        } else {
+            RelevanceProfile::TrainOnly
+        };
     }
 
     pub fn push_system(&mut self, s: SystemMetrics) {
@@ -624,7 +1126,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
     use strum::IntoEnumIterator;
 
@@ -709,6 +1213,13 @@ mod tests {
         assert_eq!(state.query, "");
         assert_eq!(state.filtered_indices, vec![0, 1]);
         assert_eq!(state.selected_index, 0);
+        assert_eq!(state.input_mode, FilePickerInputMode::Insert);
+    }
+
+    #[test]
+    fn test_file_picker_vim_starts_in_normal_mode_when_requested() {
+        let state = FilePickerState::new_for_keymap(sample_discovered_files(), "vim");
+        assert_eq!(state.input_mode, FilePickerInputMode::Normal);
     }
 
     #[test]
@@ -791,6 +1302,7 @@ mod tests {
             query: "/tmp/manual.jsonl".to_string(),
             filtered_indices: vec![],
             selected_index: 0,
+            input_mode: FilePickerInputMode::Insert,
         });
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -819,6 +1331,397 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+    }
+
+    #[test]
+    fn test_settings_mode_open_navigate_close() {
+        let mut app = App::new(Config::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        assert!(matches!(app.ui_state.mode, AppMode::Settings(_)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let (selected_row, theme_after_cycle) = match &app.ui_state.mode {
+            AppMode::Settings(state) => (state.selected_row, state.draft.theme.clone()),
+            _ => panic!("expected settings mode"),
+        };
+        assert_eq!(selected_row, 1);
+        assert_eq!(theme_after_cycle, "catppuccin");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.ui_state.mode, AppMode::Monitoring);
+        assert_eq!(app.config.theme, "classic");
+    }
+
+    #[test]
+    fn test_settings_theme_cycle_normalizes_case_and_whitespace() {
+        let config = Config {
+            theme: " Nord ".to_string(),
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let theme_after_cycle = match &app.ui_state.mode {
+            AppMode::Settings(state) => state.draft.theme.clone(),
+            _ => panic!("expected settings mode"),
+        };
+
+        assert_eq!(theme_after_cycle, "gruvbox");
+    }
+
+    #[test]
+    fn test_settings_pinned_rate_metric_cycle_preserves_non_rate_pins() {
+        let config = Config {
+            pinned_metrics: vec!["eval_loss".to_string()],
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let pinned = match &app.ui_state.mode {
+            AppMode::Settings(state) => state.draft.pinned_metrics.clone(),
+            _ => panic!("expected settings mode"),
+        };
+
+        assert!(pinned.iter().any(|m| m == "eval_loss"));
+        assert!(pinned.iter().any(|m| m == "tokens_per_second"));
+    }
+
+    #[test]
+    fn test_settings_pinned_rate_mixed_starts_from_none_for_cycle() {
+        let config = Config {
+            pinned_metrics: vec![
+                "tokens_per_second".to_string(),
+                "samples_per_second".to_string(),
+            ],
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let pinned = match &app.ui_state.mode {
+            AppMode::Settings(state) => state.draft.pinned_metrics.clone(),
+            _ => panic!("expected settings mode"),
+        };
+
+        assert_eq!(pinned_rate_preset_id(&pinned), "tokens");
+    }
+
+    #[test]
+    fn test_settings_apply_and_save_routes_to_correct_profile_target() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("epoch-settings-save-{unique}"));
+        fs::create_dir_all(&root).expect("test root should be created");
+
+        let config = Config {
+            log_file: Some(root.join("train.log")),
+            ..Config::default()
+        };
+        let mut app = App::new(config);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        if let AppMode::Settings(state) = &mut app.ui_state.mode {
+            state.draft.theme = "github".to_string();
+            state.draft.profile_target = "project".to_string();
+        } else {
+            panic!("expected settings mode");
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.mode, AppMode::Monitoring);
+        assert_eq!(app.config.theme, "github");
+
+        let saved_path = root.join(".epoch").join("config.toml");
+        let saved = fs::read_to_string(&saved_path).expect("project config should be saved");
+        assert!(saved.contains("theme = \"github\""));
+        assert!(saved.contains("profile_target = \"project\""));
+
+        fs::remove_dir_all(&root).expect("test root should be removed");
+    }
+
+    #[test]
+    fn test_handle_key_question_toggles_help_mode() {
+        let mut app = App::new(Config::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert!(matches!(app.ui_state.mode, AppMode::Help(_)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert_eq!(app.ui_state.mode, AppMode::Monitoring);
+    }
+
+    #[test]
+    fn test_handle_key_question_toggles_help_mode_without_shift_modifier() {
+        let mut app = App::new(Config::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(matches!(app.ui_state.mode, AppMode::Help(_)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.mode, AppMode::Monitoring);
+    }
+
+    #[test]
+    fn test_help_overlay_close_keys_do_not_quit_app() {
+        let mut app = App::new(Config::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert!(matches!(app.ui_state.mode, AppMode::Help(_)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.running);
+        assert_eq!(app.ui_state.mode, AppMode::Monitoring);
+    }
+
+    #[test]
+    fn test_vim_profile_hjkl_maps_to_navigation_in_monitoring() {
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
+
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.system_viewport.follow_latest = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(
+            app.ui_state.training_viewport.offset_samples,
+            App::VIEWPORT_PAN_STEP
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+    }
+
+    #[test]
+    fn test_vim_profile_does_not_break_filepicker_text_input() {
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
+        app.ui_state.mode = AppMode::FilePicker(FilePickerState::new(sample_discovered_files()));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        let query = match &app.ui_state.mode {
+            AppMode::FilePicker(state) => state.query.clone(),
+            _ => panic!("expected file picker mode"),
+        };
+        assert_eq!(query, "hl");
+    }
+
+    #[test]
+    fn test_vim_filepicker_j_types_in_insert_then_navigates_in_normal() {
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
+        app.ui_state.mode = AppMode::FilePicker(FilePickerState::new_for_keymap(
+            sample_discovered_files(),
+            "vim",
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let (query, selected_index, mode) = match &app.ui_state.mode {
+            AppMode::FilePicker(state) => {
+                (state.query.clone(), state.selected_index, state.input_mode)
+            }
+            _ => panic!("expected file picker mode"),
+        };
+        assert_eq!(query, "");
+        assert_eq!(selected_index, 1);
+        assert_eq!(mode, FilePickerInputMode::Normal);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let (query, selected_index, mode) = match &app.ui_state.mode {
+            AppMode::FilePicker(state) => {
+                (state.query.clone(), state.selected_index, state.input_mode)
+            }
+            _ => panic!("expected file picker mode"),
+        };
+        assert_eq!(query, "j");
+        assert_eq!(selected_index, 0);
+        assert_eq!(mode, FilePickerInputMode::Insert);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let mode = match &app.ui_state.mode {
+            AppMode::FilePicker(state) => state.input_mode,
+            _ => panic!("expected file picker mode"),
+        };
+        assert_eq!(mode, FilePickerInputMode::Normal);
+    }
+
+    #[test]
+    fn test_settings_navigation_isolated_from_global_vim_tab_switching() {
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
+        app.ui_state.selected_tab = Tab::Dashboard;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        let selected_row = match &app.ui_state.mode {
+            AppMode::Settings(state) => state.selected_row,
+            _ => panic!("expected settings mode"),
+        };
+
+        assert_eq!(selected_row, 1);
+        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+    }
+
+    #[test]
+    fn test_settings_arrow_keys_do_not_leak_into_global_viewport_controls() {
+        let mut app = App::new(Config::default());
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.system_viewport.follow_latest = false;
+        app.ui_state.training_viewport.offset_samples = 7;
+        app.ui_state.system_viewport.offset_samples = 9;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 7);
+        assert_eq!(app.ui_state.system_viewport.offset_samples, 9);
+    }
+
+    #[test]
+    fn test_adaptive_layout_hides_absent_unpinned_metrics() {
+        let mut config = Config::default();
+        config.adaptive_layout = true;
+        config.pinned_metrics = vec![];
+        let app = App::new(config);
+
+        assert!(!app.should_show_metric_panel("tokens_per_second", false));
+        assert!(app.should_show_metric_panel("tokens_per_second", true));
+    }
+
+    #[test]
+    fn test_user_pinned_metric_remains_visible_under_adaptivity() {
+        let mut config = Config::default();
+        config.adaptive_layout = true;
+        config.pinned_metrics = vec!["tokens_per_second".to_string()];
+        let app = App::new(config);
+
+        assert!(app.should_show_metric_panel("tokens_per_second", false));
+    }
+
+    #[test]
+    fn test_adaptive_layout_never_hides_user_pinned_metrics() {
+        let mut config = Config::default();
+        config.adaptive_layout = true;
+        config.pinned_metrics = vec!["steps_per_second".to_string()];
+        let app = App::new(config);
+
+        assert!(app.should_show_metric_panel("steps_per_second", false));
+    }
+
+    #[test]
+    fn test_metric_relevance_prefers_tokens_when_tokens_present() {
+        let mut app = App::new(Config::default());
+
+        app.push_metrics(TrainingMetrics {
+            samples_per_second: Some(20.0),
+            steps_per_second: Some(0.5),
+            tokens_per_second: Some(1500.0),
+            ..TrainingMetrics::default()
+        });
+
+        assert_eq!(app.preferred_rate_metric_id(), "tokens_per_second");
+    }
+
+    #[test]
+    fn test_metric_relevance_falls_back_to_samples_or_steps() {
+        let mut app = App::new(Config::default());
+
+        app.push_metrics(TrainingMetrics {
+            samples_per_second: Some(18.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.preferred_rate_metric_id(), "samples_per_second");
+
+        app.push_metrics(TrainingMetrics {
+            steps_per_second: Some(0.9),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.preferred_rate_metric_id(), "steps_per_second");
+    }
+
+    #[test]
+    fn test_hidden_metrics_preserve_history_for_reenable() {
+        let mut app = App::new(Config::default());
+        app.config.adaptive_layout = true;
+
+        app.push_metrics(TrainingMetrics {
+            tokens_per_second: Some(1200.0),
+            samples_per_second: Some(12.0),
+            ..TrainingMetrics::default()
+        });
+
+        assert_eq!(app.preferred_rate_metric_id(), "tokens_per_second");
+        assert_eq!(app.training.samples_per_second_history.len(), 1);
+
+        app.config
+            .hidden_metrics
+            .push("samples_per_second".to_string());
+        assert!(!app.should_show_metric_panel("samples_per_second", true));
+
+        app.config.hidden_metrics.clear();
+        assert!(app.should_show_metric_panel("samples_per_second", true));
+
+        app.push_metrics(TrainingMetrics {
+            samples_per_second: Some(15.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.training.samples_per_second_history.len(), 2);
+    }
+
+    #[test]
+    fn test_metric_relevance_handles_sparse_or_switching_streams() {
+        let mut app = App::new(Config::default());
+
+        app.push_metrics(TrainingMetrics {
+            steps_per_second: Some(0.4),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.preferred_rate_metric_id(), "steps_per_second");
+
+        app.push_metrics(TrainingMetrics {
+            tokens_per_second: Some(900.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.preferred_rate_metric_id(), "tokens_per_second");
+
+        app.push_metrics(TrainingMetrics {
+            samples_per_second: Some(21.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.preferred_rate_metric_id(), "samples_per_second");
     }
 
     #[test]

@@ -1,10 +1,13 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Sparkline};
+use ratatui::style::{Color, Style};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{
+    Axis, Block, Borders, Chart, Dataset, GraphType, LineGauge, Paragraph, Sparkline,
+};
 
 use crate::app::App;
-use crate::ui::{CPU_COLOR, GPU_COLOR, LOSS_COLOR, MUTED, RAM_COLOR};
+use crate::ui::theme::resolve_palette_from_config;
 
 fn format_loss(v: f64) -> String {
     if v < 1.0 {
@@ -36,11 +39,46 @@ fn format_throughput(v: f64) -> String {
     format!("{} tok/s", res)
 }
 
+fn render_line_graph(
+    frame: &mut Frame,
+    area: Rect,
+    block: Block,
+    name: &str,
+    series: &[u64],
+    color: Color,
+) {
+    let points = series
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| (idx as f64, *value as f64))
+        .collect::<Vec<_>>();
+    let max_y = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(1.0_f64, |acc, y| acc.max(y));
+    let max_x = points.len().saturating_sub(1) as f64;
+
+    let dataset = Dataset::default()
+        .name(name)
+        .graph_type(GraphType::Line)
+        .marker(Marker::Dot)
+        .style(Style::default().fg(color))
+        .data(&points);
+
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(Axis::default().bounds([0.0, max_x.max(1.0)]))
+        .y_axis(Axis::default().bounds([0.0, max_y]));
+    frame.render_widget(chart, area);
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = resolve_palette_from_config(&app.config);
+
     if app.training.latest.is_none() {
         let msg = Paragraph::new("Waiting for training data...")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED));
+            .style(Style::default().fg(palette.muted));
         let layout = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -51,20 +89,33 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let main_chunks =
-        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let main_chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(8),
+        Constraint::Length(3),
+    ])
+    .split(area);
 
-    let top_chunks = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(main_chunks[0]);
-
-    let history_width = usize::from(top_chunks[0].width.saturating_sub(2).max(1));
+    let history_width = usize::from(main_chunks[0].width.saturating_sub(2).max(1));
     let history_vec = app.training_viewport_series(&app.training.loss_history, history_width);
 
-    let sparkline = Sparkline::default()
-        .block(Block::default().title("Loss").borders(Borders::ALL))
-        .data(&history_vec)
-        .style(Style::default().fg(LOSS_COLOR));
-    frame.render_widget(sparkline, top_chunks[0]);
+    let loss_block = Block::default().title("Loss").borders(Borders::ALL);
+    if app.config.graph_mode == "line" && !history_vec.is_empty() {
+        render_line_graph(
+            frame,
+            main_chunks[0],
+            loss_block,
+            "loss",
+            &history_vec,
+            palette.loss_color,
+        );
+    } else {
+        let sparkline = Sparkline::default()
+            .block(loss_block)
+            .data(&history_vec)
+            .style(Style::default().fg(palette.loss_color));
+        frame.render_widget(sparkline, main_chunks[0]);
+    }
 
     let Some(latest) = app.training.latest.as_ref() else {
         return;
@@ -91,13 +142,23 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "N/A".to_string());
     let health_str = app.training_data_health_state().label();
 
-    let stats_text = format!(
-        "Latest Loss: {}\nStep Count: {}\nLearning Rate: {}\nThroughput: {}\nTokens: {}\nHealth: {}",
-        loss_str, step_str, lr_str, tp_str, tokens_str, health_str
-    );
+    let mut stats_lines = vec![
+        format!("Latest Loss: {loss_str}"),
+        format!("Step Count: {step_str}"),
+        format!("Learning Rate: {lr_str}"),
+    ];
+    if app.should_show_metric_panel("throughput", latest.throughput.is_some()) {
+        stats_lines.push(format!("Throughput: {tp_str}"));
+    }
+    if app.should_show_metric_panel("tokens", latest.tokens.is_some()) {
+        stats_lines.push(format!("Tokens: {tokens_str}"));
+    }
+    stats_lines.push(format!("Health: {health_str}"));
+
+    let stats_text = stats_lines.join("\n");
     let stats_widget =
         Paragraph::new(stats_text).block(Block::default().title("Key Stats").borders(Borders::ALL));
-    frame.render_widget(stats_widget, top_chunks[1]);
+    frame.render_widget(stats_widget, main_chunks[1]);
 
     if let Some(sys) = &app.system.latest {
         let bottom_chunks = Layout::horizontal([
@@ -105,12 +166,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Percentage(34),
             Constraint::Percentage(33),
         ])
-        .split(main_chunks[1]);
+        .split(main_chunks[2]);
 
         let cpu_ratio = (sys.cpu_usage / 100.0).clamp(0.0, 1.0);
         let cpu_gauge = LineGauge::default()
             .block(Block::default().title("CPU").borders(Borders::ALL))
-            .filled_style(Style::default().fg(CPU_COLOR))
+            .filled_style(Style::default().fg(palette.cpu_color))
             .ratio(cpu_ratio);
         frame.render_widget(cpu_gauge, bottom_chunks[0]);
 
@@ -121,7 +182,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         };
         let ram_gauge = LineGauge::default()
             .block(Block::default().title("RAM").borders(Borders::ALL))
-            .filled_style(Style::default().fg(RAM_COLOR))
+            .filled_style(Style::default().fg(palette.ram_color))
             .ratio(ram_ratio);
         frame.render_widget(ram_gauge, bottom_chunks[1]);
 
@@ -129,7 +190,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             let gpu_ratio = (gpu.utilization / 100.0).clamp(0.0, 1.0);
             let gpu_gauge = LineGauge::default()
                 .block(Block::default().title("GPU").borders(Borders::ALL))
-                .filled_style(Style::default().fg(GPU_COLOR))
+                .filled_style(Style::default().fg(palette.gpu_color))
                 .ratio(gpu_ratio);
             frame.render_widget(gpu_gauge, bottom_chunks[2]);
         } else {
@@ -141,13 +202,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let msg = Paragraph::new("Collecting system metrics...")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED));
+            .style(Style::default().fg(palette.muted));
         let layout = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
-        .split(main_chunks[1]);
+        .split(main_chunks[2]);
         frame.render_widget(msg, layout[1]);
     }
 }
@@ -323,5 +384,26 @@ mod tests {
 
         assert!(content.contains("Tokens: 42000"));
         assert!(content.contains("Health: Live"));
+    }
+
+    #[test]
+    fn test_dashboard_graph_mode_switch_between_line_and_sparkline() {
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.5),
+            learning_rate: Some(1e-4),
+            step: Some(100),
+            throughput: Some(1234.0),
+            ..Default::default()
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.config.graph_mode = "sparkline".to_string();
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+
+        app.config.graph_mode = "line".to_string();
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
     }
 }

@@ -1,15 +1,53 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Sparkline};
+use ratatui::style::{Color, Style};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{
+    Axis, Block, Borders, Chart, Dataset, GraphType, LineGauge, Paragraph, Sparkline,
+};
 
 use crate::app::App;
-use crate::ui::{CPU_COLOR, GPU_COLOR, HEADER_FG, MUTED, RAM_COLOR, WARNING};
+use crate::ui::theme::resolve_palette_from_config;
+
+fn render_line_graph(
+    frame: &mut Frame,
+    area: Rect,
+    block: Block,
+    name: &str,
+    series: &[u64],
+    color: Color,
+) {
+    let points = series
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| (idx as f64, *value as f64))
+        .collect::<Vec<_>>();
+    let max_y = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(1.0_f64, |acc, y| acc.max(y));
+    let max_x = points.len().saturating_sub(1) as f64;
+
+    let dataset = Dataset::default()
+        .name(name)
+        .graph_type(GraphType::Line)
+        .marker(Marker::Dot)
+        .style(Style::default().fg(color))
+        .data(&points);
+
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(Axis::default().bounds([0.0, max_x.max(1.0)]))
+        .y_axis(Axis::default().bounds([0.0, max_y]));
+    frame.render_widget(chart, area);
+}
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let palette = resolve_palette_from_config(&app.config);
+
     let Some(system) = &app.system.latest else {
         let msg = Paragraph::new("Collecting system metrics...")
-            .style(Style::default().fg(MUTED))
+            .style(Style::default().fg(palette.muted))
             .alignment(Alignment::Center);
 
         let layout = Layout::default()
@@ -28,18 +66,26 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(6),
             Constraint::Min(0),
+            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(area);
 
+    let gauges = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+        ])
+        .split(layout[1]);
+
     let cpu_ratio = (system.cpu_usage / 100.0).clamp(0.0, 1.0);
     let cpu_color = if system.cpu_usage > 80.0 {
-        WARNING
+        palette.warning
     } else {
-        CPU_COLOR
+        palette.cpu_color
     };
 
     let cpu_gauge = LineGauge::default()
@@ -50,12 +96,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .ratio(cpu_ratio)
         .label(format!("{:.1}%", system.cpu_usage));
 
-    frame.render_widget(cpu_gauge, layout[0]);
+    frame.render_widget(cpu_gauge, gauges[0]);
 
     let ram_ratio = (system.memory_used as f64 / system.memory_total.max(1) as f64).clamp(0.0, 1.0);
     let ram_gauge = LineGauge::default()
         .block(Block::default().title("RAM").borders(Borders::ALL))
-        .filled_style(Style::default().fg(RAM_COLOR))
+        .filled_style(Style::default().fg(palette.ram_color))
         .filled_symbol("█")
         .unfilled_symbol(" ")
         .ratio(ram_ratio)
@@ -65,103 +111,117 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             format_bytes(system.memory_total)
         ));
 
-    frame.render_widget(ram_gauge, layout[1]);
+    frame.render_widget(ram_gauge, gauges[1]);
+
+    let gpu_ratio = if system.gpus.is_empty() {
+        0.0
+    } else {
+        (system.gpus.iter().map(|g| g.utilization).sum::<f64>() / system.gpus.len() as f64 / 100.0)
+            .clamp(0.0, 1.0)
+    };
+    let gpu_label = if system.gpus.is_empty() {
+        "N/A".to_string()
+    } else {
+        format!("{:.1}% avg", gpu_ratio * 100.0)
+    };
+    let gpu_top = LineGauge::default()
+        .block(
+            Block::default()
+                .title(if system.gpus.is_empty() {
+                    "GPU: Not available"
+                } else {
+                    "GPU"
+                })
+                .borders(Borders::ALL),
+        )
+        .filled_style(Style::default().fg(palette.gpu_color))
+        .filled_symbol("█")
+        .unfilled_symbol(" ")
+        .ratio(gpu_ratio)
+        .label(gpu_label);
+    frame.render_widget(gpu_top, gauges[2]);
 
     if system.gpus.is_empty() {
-        let block = Block::default()
-            .title("GPU: Not available")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(MUTED));
         let p = Paragraph::new("No GPU detected")
-            .style(Style::default().fg(MUTED))
-            .block(block);
-        frame.render_widget(p, layout[2]);
+            .style(Style::default().fg(palette.muted))
+            .block(Block::default().title("GPU Details").borders(Borders::ALL));
+        frame.render_widget(p, layout[0]);
     } else {
-        let max_visible = usize::from((layout[2].height / 3).max(1));
+        let max_visible = usize::from(layout[0].height.saturating_sub(2).max(1)).min(2);
         let visible_count = system.gpus.len().min(max_visible);
         let hidden_count = system.gpus.len().saturating_sub(visible_count);
-
-        let mut gpu_constraints = vec![Constraint::Length(3); visible_count];
-        if hidden_count > 0 {
-            gpu_constraints.push(Constraint::Length(1));
-        }
-
-        let gpus_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(gpu_constraints)
-            .split(layout[2]);
 
         let avg_util =
             system.gpus.iter().map(|g| g.utilization).sum::<f64>() / system.gpus.len() as f64;
 
+        let mut lines = Vec::with_capacity(visible_count + usize::from(hidden_count > 0));
         for (i, gpu) in system.gpus.iter().take(visible_count).enumerate() {
-            let gpu_area = gpus_layout[i];
-            let gpu_ratio = (gpu.utilization / 100.0).clamp(0.0, 1.0);
             let is_outlier = (gpu.utilization - avg_util).abs() >= 30.0;
-            let title = if is_outlier {
-                format!("GPU {}: {} [OUTLIER]", i, gpu.name)
-            } else {
-                format!("GPU {}: {}", i, gpu.name)
-            };
-
-            let block = Block::default().title(title).borders(Borders::ALL);
-            let inner_area = block.inner(gpu_area);
-            frame.render_widget(block, gpu_area);
-
-            let gpu_inner_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Length(1)])
-                .split(inner_area);
-
-            let gpu_gauge = LineGauge::default()
-                .filled_style(Style::default().fg(if is_outlier { WARNING } else { GPU_COLOR }))
-                .filled_symbol("█")
-                .unfilled_symbol(" ")
-                .ratio(gpu_ratio)
-                .label(format!("{:.1}%", gpu.utilization));
-            frame.render_widget(gpu_gauge, gpu_inner_layout[0]);
-
-            let detail_text = format!(
-                "{} / {}   {}",
+            let marker = if is_outlier { " [OUTLIER]" } else { "" };
+            lines.push(format!(
+                "GPU {} {}{marker} | {:.1}% | {}/{} | {}",
+                i,
+                gpu.name,
+                gpu.utilization,
                 format_bytes(gpu.memory_used),
                 format_bytes(gpu.memory_total),
                 format_temp(gpu.temperature)
-            );
-
-            let detail = Paragraph::new(detail_text).style(Style::default().fg(HEADER_FG));
-            frame.render_widget(detail, gpu_inner_layout[1]);
+            ));
         }
-
         if hidden_count > 0 {
-            let hidden = Paragraph::new(format!("+{} more GPUs", hidden_count))
-                .alignment(Alignment::Right)
-                .style(Style::default().fg(MUTED));
-            frame.render_widget(hidden, gpus_layout[visible_count]);
+            lines.push(format!("+{} more GPUs", hidden_count));
         }
+
+        let gpu_details = Paragraph::new(lines.join("\n"))
+            .style(Style::default().fg(palette.header_fg))
+            .block(Block::default().title("GPU Details").borders(Borders::ALL));
+        frame.render_widget(gpu_details, layout[0]);
     }
 
     let history_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(layout[3]);
+        .split(layout[2]);
 
     let history_width = usize::from(history_layout[0].width.saturating_sub(2).max(1));
     let cpu_data = app.system_viewport_series(&app.system.cpu_history, history_width);
     let ram_data = app.system_viewport_series(&app.system.ram_history, history_width);
 
-    let cpu_sparkline = Sparkline::default()
-        .block(Block::default().title("CPU History").borders(Borders::ALL))
-        .data(&cpu_data)
-        .style(Style::default().fg(CPU_COLOR))
-        .max(10000);
-    frame.render_widget(cpu_sparkline, history_layout[0]);
+    if app.config.graph_mode == "line" && !cpu_data.is_empty() {
+        render_line_graph(
+            frame,
+            history_layout[0],
+            Block::default().title("CPU History").borders(Borders::ALL),
+            "cpu",
+            &cpu_data,
+            palette.cpu_color,
+        );
+    } else {
+        let cpu_sparkline = Sparkline::default()
+            .block(Block::default().title("CPU History").borders(Borders::ALL))
+            .data(&cpu_data)
+            .style(Style::default().fg(palette.cpu_color))
+            .max(10000);
+        frame.render_widget(cpu_sparkline, history_layout[0]);
+    }
 
-    let ram_sparkline = Sparkline::default()
-        .block(Block::default().title("RAM History").borders(Borders::ALL))
-        .data(&ram_data)
-        .style(Style::default().fg(RAM_COLOR))
-        .max(10000);
-    frame.render_widget(ram_sparkline, history_layout[1]);
+    if app.config.graph_mode == "line" && !ram_data.is_empty() {
+        render_line_graph(
+            frame,
+            history_layout[1],
+            Block::default().title("RAM History").borders(Borders::ALL),
+            "ram",
+            &ram_data,
+            palette.ram_color,
+        );
+    } else {
+        let ram_sparkline = Sparkline::default()
+            .block(Block::default().title("RAM History").borders(Borders::ALL))
+            .data(&ram_data)
+            .style(Style::default().fg(palette.ram_color))
+            .max(10000);
+        frame.render_widget(ram_sparkline, history_layout[1]);
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -445,5 +505,32 @@ mod tests {
             .join("\n");
 
         assert!(content.contains("OUTLIER"));
+    }
+
+    #[test]
+    fn test_system_graph_mode_switch_between_line_and_sparkline() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.push_system(SystemMetrics {
+            cpu_usage: 45.0,
+            memory_used: 8_589_934_592,
+            memory_total: 17_179_869_184,
+            gpus: vec![],
+        });
+        for i in 0..20 {
+            app.system.cpu_history.push_back((i * 300) as u64);
+            app.system.ram_history.push_back((i * 200) as u64);
+        }
+
+        app.config.graph_mode = "sparkline".to_string();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+
+        app.config.graph_mode = "line".to_string();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
     }
 }
