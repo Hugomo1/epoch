@@ -58,7 +58,7 @@ Arguments:
 
 Options:
       --stdin            Read metrics from standard input
-      --parser <TYPE>    Override log parser (auto, jsonl, csv, regex)
+      --parser <TYPE>    Override log parser (auto, jsonl, csv, regex, tensorboard)
   -h, --help             Print help
   -V, --version          Print version
 ```
@@ -68,6 +68,7 @@ Examples:
 ```bash
 epoch train.log
 epoch --parser jsonl train.log
+epoch --parser tensorboard train.log
 python train.py | epoch --stdin
 epoch
 ```
@@ -102,68 +103,126 @@ Epoch focuses on the things you care about during training.
 
 # Supported Log Formats
 
-Epoch works with common training log styles.
+Epoch supports parser detection and explicit parser override.
 
-**Currently supported**
+- `auto` (default): detects known formats from stream/file content
+- `jsonl`: JSON object per line (including nested aliases)
+- `csv`: header-based CSV metrics
+- `regex`: custom named capture parser via `regex_pattern`
+- `tensorboard`: parser entrypoint is wired and safe (non-panicking fallback)
 
-```
+Examples:
+
+```text
 JSONL
 {"loss": 0.53, "step": 120, "lr": 1e-4}
 ```
 
-```
+```text
 CSV
 step,loss,lr
 ```
 
-```
+```text
 Regex
-custom training logs
+step=120 loss=0.53 lr=1e-4
 ```
 
+```text
+HuggingFace trainer_state.json (auto mode)
 ```
-HuggingFace trainer_state.json
-```
-
-More integrations are planned.
 
 # Keybindings
 
-| Key               | Action                      |
-| ----------------- | --------------------------- |
-| `Tab` / `→`       | Next panel                  |
-| `Shift+Tab` / `←` | Previous panel              |
-| `1 2 3 4`         | Jump to panel               |
-| `Space`           | Pause / resume live updates |
-| `Left / Right`    | Scroll history              |
-| `- / =`           | Zoom timeline               |
-| `g`               | Return to live view         |
-| `q`               | Quit                        |
+Global:
+
+| Key | Action |
+| --- | --- |
+| `q` / `Ctrl+C` | Quit |
+| `Tab` / `Shift+Tab` | Switch tabs |
+| `1/2/3/4` | Jump to Dashboard / Metrics / System / Advanced |
+| `Space` | Toggle live/pause |
+| `Left/Right` | Pan history |
+| `- / =` | Zoom out / in |
+| `g` | Reset viewport to live |
+| `s` | Open settings |
+| `?` | Toggle help overlay |
+
+Vim profile extras (`keymap_profile = "vim"`):
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Next / previous tab (monitoring mode) |
+| `h` / `l` | Pan history left / right (monitoring mode) |
+
+File picker in vim profile is modal:
+
+| Mode | Key | Action |
+| --- | --- | --- |
+| `NORMAL` | `i` | Enter insert mode |
+| `NORMAL` | `j/k` or `Up/Down` | Move selection |
+| `NORMAL` | `Enter` | Open selected file |
+| `NORMAL` | `Esc` / `q` | Quit |
+| `INSERT` | Type | Edit query |
+| `INSERT` | `Esc` | Return to normal mode |
 
 # Configuration
 
-`epoch` can be configured with a small TOML file.
+`epoch` uses layered TOML configuration.
 
 ```
 ~/.config/epoch/config.toml
 ```
+
+Optional project-local override:
+
+```
+<project>/.epoch/config.toml
+```
+
+Effective precedence:
+
+1. Built-in defaults
+2. Global config (`~/.config/epoch/config.toml`)
+3. Project config (`.epoch/config.toml`)
+4. CLI flags
 
 Example:
 
 ```toml
 tick_rate_ms = 100
 parser = "auto"
+theme = "system"           # classic | catppuccin | github | nord | gruvbox | solarized | dracula | system | custom
+graph_mode = "line"        # sparkline | line
+adaptive_layout = true
+pinned_metrics = ["tokens_per_second"]
+hidden_metrics = []
+keymap_profile = "vim"     # default | vim
+profile_target = "project" # global | project
+
+[custom_theme]
+header_bg = "#1e1e2e"
+accent = "#89b4fa"
 ```
 
-# Coming Next
+Notes:
 
-```
-[ ] TensorBoard log support
-[ ] Run comparison view
-[ ] smoother loss graphs
-[ ] HuggingFace Trainer integration
-[ ] distributed training monitoring
-```
+- `theme = "system"` follows terminal/TTY color semantics (terminal default colors + ANSI palette), not desktop GTK/OS theme.
+- `EPOCH_SYSTEM_THEME` can explicitly force a built-in palette when needed (for example `nord`, `dark`, `light`).
+- Hidden metrics are UI visibility controls only; raw histories are still collected and available when re-enabled.
+
+Settings mode (`s`) edits these values at runtime:
+
+- `a`: apply without closing
+- `w` or `Enter`: save and close
+- `Esc`: cancel and restore original draft
+
+# Behavior Guarantees
+
+- Parser normalization strips ANSI/progress artifacts and handles invalid control bytes safely.
+- Parser diagnostics track success/skipped/error counters and surface parser mode in status.
+- Adaptive layout and metric relevance never discard raw metric history.
+- Terminal restoration is preserved on exit and panic paths.
 
 # License
 

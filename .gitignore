@@ -8,3 +8,6 @@ AGENTS.md
 *.swo
 .DS_Store
 *.log
+demo_stream.py
+demo.jsonl
+TODO.md
