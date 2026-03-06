@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -6,8 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
+use crate::collectors::process::ProcessCandidate;
 use crate::collectors::training::parser_telemetry_snapshot;
-use crate::config::Config;
+use crate::config::{AlertEvalMode, AlertRuleConfig, AlertRuleKind, Config};
 use crate::discovery::DiscoveredFile;
 use crate::event::Event;
 use crate::types::{SystemMetrics, TrainingMetrics};
@@ -26,6 +27,8 @@ pub struct TrainingState {
     pub samples_per_second_history: VecDeque<u64>,
     pub steps_per_second_history: VecDeque<u64>,
     pub tokens_per_second_history: VecDeque<u64>,
+    pub step_loss_points: VecDeque<(u64, u64)>,
+    pub step_lr_points: VecDeque<(u64, u64)>,
     pub preferred_rate_metric: RateMetricPreference,
     pub relevance_profile: RelevanceProfile,
     pub perplexity_latest: Option<f64>,
@@ -78,11 +81,68 @@ pub struct SystemState {
 #[derive(Debug)]
 pub struct UiState {
     pub selected_tab: Tab,
+    pub primary_view: PrimaryView,
     pub mode: AppMode,
     pub selected_file: Option<PathBuf>,
     pub scanning_frame: usize,
     pub training_viewport: ViewportState,
     pub system_viewport: ViewportState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimaryView {
+    Home,
+    LiveRun,
+    RunExplorer,
+    EventsNotes,
+    SystemProcesses,
+}
+
+impl PrimaryView {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::LiveRun => "Live Run",
+            Self::RunExplorer => "Run Explorer",
+            Self::EventsNotes => "Events/Notes",
+            Self::SystemProcesses => "System/Processes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertLevel {
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlertRecord {
+    pub rule_id: String,
+    pub level: AlertLevel,
+    pub value: f64,
+    pub message: String,
+    pub tick: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct AlertsState {
+    pub tick: u64,
+    pub active: Vec<AlertRecord>,
+    pub resolved: Vec<AlertRecord>,
+    cooldown_until: HashMap<String, u64>,
+}
+
+#[derive(Debug, Default)]
+pub struct RunComparisonState {
+    pub baseline_loss_history: VecDeque<u64>,
+    pub baseline_lr_history: VecDeque<u64>,
+    pub baseline_step_history: VecDeque<u64>,
+    pub baseline_step_loss_points: VecDeque<(u64, u64)>,
+    pub baseline_step_lr_points: VecDeque<(u64, u64)>,
+    pub baseline_step_loss_map: HashMap<u64, u64>,
+    pub baseline_step_lr_map: HashMap<u64, u64>,
+    pub snapshot_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,7 +402,12 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
     let mut entries = vec![
         ("q / Ctrl+C".to_string(), "Quit".to_string()),
         ("Tab / Shift+Tab".to_string(), "Switch tab".to_string()),
-        ("1/2/3/4".to_string(), "Jump to tab".to_string()),
+        ("1/2 (3/4 legacy)".to_string(), "Jump to tab".to_string()),
+        ("5".to_string(), "Go to Home".to_string()),
+        ("6".to_string(), "Go to Live Run".to_string()),
+        ("7".to_string(), "Go to Run Explorer".to_string()),
+        ("8".to_string(), "Go to Events/Notes".to_string()),
+        ("9".to_string(), "Go to System/Processes".to_string()),
         ("Space".to_string(), "Toggle live/pause".to_string()),
         ("Left/Right".to_string(), "Pan history".to_string()),
         ("- / =".to_string(), "Zoom out/in".to_string()),
@@ -429,7 +494,10 @@ pub struct App {
     pub running: bool,
     pub training: TrainingState,
     pub system: SystemState,
+    pub discovered_processes: Vec<ProcessCandidate>,
     pub ui_state: UiState,
+    pub alerts: AlertsState,
+    pub run_comparison: RunComparisonState,
     pub config: Config,
 }
 
@@ -453,6 +521,8 @@ impl App {
                 samples_per_second_history: VecDeque::with_capacity(capacity),
                 steps_per_second_history: VecDeque::with_capacity(capacity),
                 tokens_per_second_history: VecDeque::with_capacity(capacity),
+                step_loss_points: VecDeque::with_capacity(capacity),
+                step_lr_points: VecDeque::with_capacity(capacity),
                 preferred_rate_metric: RateMetricPreference::Throughput,
                 relevance_profile: RelevanceProfile::TrainOnly,
                 perplexity_latest: None,
@@ -474,14 +544,18 @@ impl App {
                 ram_history: VecDeque::with_capacity(capacity),
                 gpu_history: VecDeque::with_capacity(capacity),
             },
+            discovered_processes: Vec::new(),
             ui_state: UiState {
-                selected_tab: Tab::Dashboard,
+                selected_tab: Tab::Main,
+                primary_view: PrimaryView::LiveRun,
                 mode: AppMode::Monitoring,
                 selected_file: None,
                 scanning_frame: 0,
                 training_viewport: ViewportState::default(),
                 system_viewport: ViewportState::default(),
             },
+            alerts: AlertsState::default(),
+            run_comparison: RunComparisonState::default(),
             config,
         }
     }
@@ -721,23 +795,25 @@ impl App {
             }
             (KeyCode::Char('j'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
                 let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab =
-                    Tab::from_repr((current + 1) % 4).unwrap_or(Tab::Dashboard);
+                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
                 let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab =
-                    Tab::from_repr((current + 3) % 4).unwrap_or(Tab::Dashboard);
+                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
             }
             (KeyCode::Char('h'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                if !self.ui_state.training_viewport.follow_latest {
+                if !self.ui_state.training_viewport.follow_latest
+                    && self.ui_state.training_viewport.zoom_level > 0
+                {
                     self.ui_state.training_viewport.offset_samples = self
                         .ui_state
                         .training_viewport
                         .offset_samples
                         .saturating_add(Self::VIEWPORT_PAN_STEP);
                 }
-                if !self.ui_state.system_viewport.follow_latest {
+                if !self.ui_state.system_viewport.follow_latest
+                    && self.ui_state.system_viewport.zoom_level > 0
+                {
                     self.ui_state.system_viewport.offset_samples = self
                         .ui_state
                         .system_viewport
@@ -746,38 +822,63 @@ impl App {
                 }
             }
             (KeyCode::Char('l'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                self.ui_state.training_viewport.offset_samples = self
-                    .ui_state
-                    .training_viewport
-                    .offset_samples
-                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
-                self.ui_state.system_viewport.offset_samples = self
-                    .ui_state
-                    .system_viewport
-                    .offset_samples
-                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                if !self.ui_state.training_viewport.follow_latest
+                    && self.ui_state.training_viewport.zoom_level > 0
+                {
+                    self.ui_state.training_viewport.offset_samples = self
+                        .ui_state
+                        .training_viewport
+                        .offset_samples
+                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                }
+                if !self.ui_state.system_viewport.follow_latest
+                    && self.ui_state.system_viewport.zoom_level > 0
+                {
+                    self.ui_state.system_viewport.offset_samples = self
+                        .ui_state
+                        .system_viewport
+                        .offset_samples
+                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                }
             }
             (KeyCode::Tab, _) => {
                 let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab =
-                    Tab::from_repr((current + 1) % 4).unwrap_or(Tab::Dashboard);
+                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
             }
             (KeyCode::BackTab, _) => {
                 let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab =
-                    Tab::from_repr((current + 3) % 4).unwrap_or(Tab::Dashboard);
+                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
             }
             (KeyCode::Char('1'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Dashboard;
+                self.ui_state.selected_tab = Tab::Main;
+                self.ui_state.primary_view = PrimaryView::LiveRun;
             }
             (KeyCode::Char('2'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Metrics;
+                self.ui_state.selected_tab = Tab::Diagnostics;
+                self.ui_state.primary_view = PrimaryView::LiveRun;
             }
             (KeyCode::Char('3'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::System;
+                self.ui_state.selected_tab = Tab::Diagnostics;
+                self.ui_state.primary_view = PrimaryView::LiveRun;
             }
             (KeyCode::Char('4'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Advanced;
+                self.ui_state.selected_tab = Tab::Diagnostics;
+                self.ui_state.primary_view = PrimaryView::LiveRun;
+            }
+            (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::Home;
+            }
+            (KeyCode::Char('6'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::LiveRun;
+            }
+            (KeyCode::Char('7'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::RunExplorer;
+            }
+            (KeyCode::Char('8'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::EventsNotes;
+            }
+            (KeyCode::Char('9'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::SystemProcesses;
             }
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 let follow_latest = !self.ui_state.training_viewport.follow_latest;
@@ -789,14 +890,18 @@ impl App {
                 }
             }
             (KeyCode::Left, KeyModifiers::NONE) => {
-                if !self.ui_state.training_viewport.follow_latest {
+                if !self.ui_state.training_viewport.follow_latest
+                    && self.ui_state.training_viewport.zoom_level > 0
+                {
                     self.ui_state.training_viewport.offset_samples = self
                         .ui_state
                         .training_viewport
                         .offset_samples
                         .saturating_add(Self::VIEWPORT_PAN_STEP);
                 }
-                if !self.ui_state.system_viewport.follow_latest {
+                if !self.ui_state.system_viewport.follow_latest
+                    && self.ui_state.system_viewport.zoom_level > 0
+                {
                     self.ui_state.system_viewport.offset_samples = self
                         .ui_state
                         .system_viewport
@@ -805,24 +910,47 @@ impl App {
                 }
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
-                self.ui_state.training_viewport.offset_samples = self
-                    .ui_state
-                    .training_viewport
-                    .offset_samples
-                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
-                self.ui_state.system_viewport.offset_samples = self
-                    .ui_state
-                    .system_viewport
-                    .offset_samples
-                    .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                if !self.ui_state.training_viewport.follow_latest
+                    && self.ui_state.training_viewport.zoom_level > 0
+                {
+                    self.ui_state.training_viewport.offset_samples = self
+                        .ui_state
+                        .training_viewport
+                        .offset_samples
+                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                }
+                if !self.ui_state.system_viewport.follow_latest
+                    && self.ui_state.system_viewport.zoom_level > 0
+                {
+                    self.ui_state.system_viewport.offset_samples = self
+                        .ui_state
+                        .system_viewport
+                        .offset_samples
+                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                }
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 self.ui_state.training_viewport.follow_latest = true;
                 self.ui_state.system_viewport.follow_latest = true;
                 self.ui_state.training_viewport.offset_samples = 0;
                 self.ui_state.system_viewport.offset_samples = 0;
+                self.ui_state.training_viewport.zoom_level = 0;
+                self.ui_state.system_viewport.zoom_level = 0;
             }
             (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                self.ui_state.training_viewport.zoom_level =
+                    self.ui_state.training_viewport.zoom_level.saturating_sub(1);
+                self.ui_state.system_viewport.zoom_level =
+                    self.ui_state.system_viewport.zoom_level.saturating_sub(1);
+
+                if self.ui_state.training_viewport.zoom_level == 0 {
+                    self.ui_state.training_viewport.offset_samples = 0;
+                }
+                if self.ui_state.system_viewport.zoom_level == 0 {
+                    self.ui_state.system_viewport.offset_samples = 0;
+                }
+            }
+            (KeyCode::Char('='), KeyModifiers::NONE) => {
                 self.ui_state.training_viewport.zoom_level = self
                     .ui_state
                     .training_viewport
@@ -836,17 +964,12 @@ impl App {
                     .saturating_add(1)
                     .min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
             }
-            (KeyCode::Char('='), KeyModifiers::NONE) => {
-                self.ui_state.training_viewport.zoom_level =
-                    self.ui_state.training_viewport.zoom_level.saturating_sub(1);
-                self.ui_state.system_viewport.zoom_level =
-                    self.ui_state.system_viewport.zoom_level.saturating_sub(1);
-            }
             _ => {}
         }
     }
 
     pub fn on_tick(&mut self) {
+        self.alerts.tick = self.alerts.tick.saturating_add(1);
         let parser_telemetry = parser_telemetry_snapshot();
         self.training.parser_success_count = parser_telemetry.success_count;
         self.training.parser_skipped_count = parser_telemetry.skipped_count;
@@ -861,6 +984,8 @@ impl App {
                 self.training.input_active = false;
             }
         }
+
+        self.evaluate_alerts();
     }
 
     pub fn training_data_health_state(&self) -> DataHealthState {
@@ -901,16 +1026,28 @@ impl App {
             }
         }
 
-        self.training.latest = Some(m.clone());
-
         if let Some(loss) = m.loss {
             let scaled = Self::scale_to_u64(loss, 1000.0);
             Self::push_bounded(&mut self.training.loss_history, scaled, capacity);
+            if let Some(step) = m.step {
+                Self::push_bounded_pair(
+                    &mut self.training.step_loss_points,
+                    (step, scaled),
+                    capacity,
+                );
+            }
         }
 
         if let Some(lr) = m.learning_rate {
             let scaled = Self::scale_to_u64(lr, 1_000_000.0);
             Self::push_bounded(&mut self.training.lr_history, scaled, capacity);
+            if let Some(step) = m.step {
+                Self::push_bounded_pair(
+                    &mut self.training.step_lr_points,
+                    (step, scaled),
+                    capacity,
+                );
+            }
         }
 
         if let Some(step) = m.step {
@@ -968,14 +1105,17 @@ impl App {
             );
         }
 
-        self.recompute_metric_relevance();
-
         self.training.input_active = true;
         self.training.last_data_at = Some(Instant::now());
 
         if self.training.start_time.is_none() {
             self.training.start_time = Some(Instant::now());
         }
+
+        self.training.latest = Some(m);
+        self.recompute_metric_relevance();
+
+        self.evaluate_alerts();
     }
 
     fn recompute_metric_relevance(&mut self) {
@@ -1007,6 +1147,491 @@ impl App {
         };
     }
 
+    fn evaluate_alerts(&mut self) {
+        if self.config.alert_rules.is_empty() {
+            self.alerts.active.clear();
+            self.alerts.cooldown_until.clear();
+            return;
+        }
+
+        let enabled_rule_ids = self
+            .config
+            .alert_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.enabled)
+            .map(|(idx, rule)| Self::rule_id(rule, idx))
+            .collect::<Vec<_>>();
+        self.alerts
+            .active
+            .retain(|record| enabled_rule_ids.iter().any(|id| id == &record.rule_id));
+        self.alerts
+            .cooldown_until
+            .retain(|rule_id, _| enabled_rule_ids.iter().any(|id| id == rule_id));
+
+        for (idx, rule) in self.config.alert_rules.iter().enumerate() {
+            if !rule.enabled {
+                continue;
+            }
+
+            let rule_id = Self::rule_id(rule, idx);
+            let Some(value) = self.alert_value(rule) else {
+                continue;
+            };
+
+            let current_level = self
+                .alerts
+                .active
+                .iter()
+                .find(|record| record.rule_id == rule_id)
+                .map(|record| record.level);
+            let desired_level = self.level_for_rule(rule, value);
+            let next_level = self.apply_hysteresis(rule, current_level, desired_level, value);
+
+            match (current_level, next_level) {
+                (None, Some(level)) => {
+                    let cooldown = self
+                        .alerts
+                        .cooldown_until
+                        .get(&rule_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if self.alerts.tick < cooldown {
+                        continue;
+                    }
+                    self.alerts.active.push(AlertRecord {
+                        rule_id: rule_id.clone(),
+                        level,
+                        value,
+                        message: Self::alert_message(&rule_id, level, value),
+                        tick: self.alerts.tick,
+                    });
+                }
+                (Some(_), None) => {
+                    if let Some(idx) = self
+                        .alerts
+                        .active
+                        .iter()
+                        .position(|record| record.rule_id == rule_id)
+                    {
+                        let mut resolved = self.alerts.active.remove(idx);
+                        resolved.message = format!("resolved at {:.3}", value);
+                        resolved.tick = self.alerts.tick;
+                        self.alerts.resolved.push(resolved);
+                        if self.alerts.resolved.len() > 20 {
+                            let drain = self.alerts.resolved.len() - 20;
+                            self.alerts.resolved.drain(0..drain);
+                        }
+                        self.alerts
+                            .cooldown_until
+                            .insert(rule_id.clone(), self.alerts.tick.saturating_add(30));
+                    }
+                }
+                (Some(current), Some(next)) if current != next => {
+                    if let Some(record) = self
+                        .alerts
+                        .active
+                        .iter_mut()
+                        .find(|record| record.rule_id == rule_id)
+                    {
+                        record.level = next;
+                        record.value = value;
+                        record.tick = self.alerts.tick;
+                        record.message = Self::alert_message(&rule_id, next, value);
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    if let Some(record) = self
+                        .alerts
+                        .active
+                        .iter_mut()
+                        .find(|record| record.rule_id == rule_id)
+                    {
+                        record.value = value;
+                        record.tick = self.alerts.tick;
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+    }
+
+    fn alert_value(&self, rule: &AlertRuleConfig) -> Option<f64> {
+        match rule.kind {
+            AlertRuleKind::ThroughputDrop => {
+                let (history, current, scale) = match self.training.preferred_rate_metric {
+                    RateMetricPreference::TokensPerSecond => (
+                        &self.training.tokens_per_second_history,
+                        self.training
+                            .latest
+                            .as_ref()
+                            .and_then(|m| m.tokens_per_second),
+                        1.0,
+                    ),
+                    RateMetricPreference::SamplesPerSecond => (
+                        &self.training.samples_per_second_history,
+                        self.training
+                            .latest
+                            .as_ref()
+                            .and_then(|m| m.samples_per_second),
+                        1.0,
+                    ),
+                    RateMetricPreference::StepsPerSecond => (
+                        &self.training.steps_per_second_history,
+                        self.training
+                            .latest
+                            .as_ref()
+                            .and_then(|m| m.steps_per_second),
+                        1000.0,
+                    ),
+                    RateMetricPreference::Throughput => (
+                        &self.training.throughput_history,
+                        self.training.latest.as_ref().and_then(|m| m.throughput),
+                        1.0,
+                    ),
+                };
+                self.apply_eval_mode(&rule.mode, history, scale, current)
+            }
+            AlertRuleKind::MemoryPressure => self.apply_eval_mode(
+                &rule.mode,
+                &self.system.ram_history,
+                100.0,
+                self.system
+                    .latest
+                    .as_ref()
+                    .map(|s| s.memory_usage_percent()),
+            ),
+            AlertRuleKind::LossTrendWorsening => {
+                let rolling_window = match rule.mode {
+                    AlertEvalMode::RollingMean { window } => window.max(1),
+                    AlertEvalMode::Current => 1,
+                };
+                self.loss_trend_slope(rolling_window, 20)
+            }
+        }
+    }
+
+    fn rule_id(rule: &AlertRuleConfig, index: usize) -> String {
+        rule.id
+            .clone()
+            .unwrap_or_else(|| format!("{}#{index}", rule.kind.as_id()))
+    }
+
+    fn apply_eval_mode(
+        &self,
+        mode: &AlertEvalMode,
+        history: &VecDeque<u64>,
+        scale: f64,
+        current: Option<f64>,
+    ) -> Option<f64> {
+        match mode {
+            AlertEvalMode::Current => current,
+            AlertEvalMode::RollingMean { window } => {
+                if *window == 0 {
+                    return current;
+                }
+                let count = history.len().min(*window);
+                if count == 0 {
+                    return current;
+                }
+                let sum: f64 = history
+                    .iter()
+                    .rev()
+                    .take(count)
+                    .map(|v| *v as f64 / scale)
+                    .sum();
+                Some(sum / count as f64)
+            }
+        }
+    }
+
+    fn loss_trend_slope(&self, rolling_window: usize, slope_points: usize) -> Option<f64> {
+        if rolling_window == 0 || slope_points < 2 {
+            return None;
+        }
+        let losses = self
+            .training
+            .loss_history
+            .iter()
+            .map(|v| *v as f64 / 1000.0)
+            .collect::<Vec<_>>();
+        if losses.len() < rolling_window + slope_points {
+            return None;
+        }
+
+        let mut smoothed = Vec::with_capacity(losses.len().saturating_sub(rolling_window) + 1);
+        for idx in 0..=losses.len() - rolling_window {
+            let window = &losses[idx..idx + rolling_window];
+            smoothed.push(window.iter().sum::<f64>() / rolling_window as f64);
+        }
+        if smoothed.len() < slope_points {
+            return None;
+        }
+
+        let tail = &smoothed[smoothed.len() - slope_points..];
+        let first = tail.first().copied()?;
+        let last = tail.last().copied()?;
+        Some((last - first) / (slope_points - 1) as f64)
+    }
+
+    fn level_for_rule(&self, rule: &AlertRuleConfig, value: f64) -> Option<AlertLevel> {
+        match rule.kind {
+            AlertRuleKind::ThroughputDrop => {
+                if value <= rule.critical {
+                    Some(AlertLevel::Critical)
+                } else if value <= rule.warning {
+                    Some(AlertLevel::Warning)
+                } else {
+                    None
+                }
+            }
+            AlertRuleKind::MemoryPressure | AlertRuleKind::LossTrendWorsening => {
+                if value >= rule.critical {
+                    Some(AlertLevel::Critical)
+                } else if value >= rule.warning {
+                    Some(AlertLevel::Warning)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn apply_hysteresis(
+        &self,
+        rule: &AlertRuleConfig,
+        current: Option<AlertLevel>,
+        desired: Option<AlertLevel>,
+        value: f64,
+    ) -> Option<AlertLevel> {
+        let band = 0.05;
+        match (rule.kind, current, desired) {
+            (
+                AlertRuleKind::ThroughputDrop,
+                Some(AlertLevel::Critical),
+                Some(AlertLevel::Warning),
+            ) if value <= rule.critical * (1.0 + band) => Some(AlertLevel::Critical),
+            (AlertRuleKind::ThroughputDrop, Some(AlertLevel::Warning), None)
+                if value <= rule.warning * (1.0 + band) =>
+            {
+                Some(AlertLevel::Warning)
+            }
+            (
+                AlertRuleKind::MemoryPressure | AlertRuleKind::LossTrendWorsening,
+                Some(AlertLevel::Critical),
+                Some(AlertLevel::Warning),
+            ) if value >= rule.critical * (1.0 - band) => Some(AlertLevel::Critical),
+            (
+                AlertRuleKind::MemoryPressure | AlertRuleKind::LossTrendWorsening,
+                Some(AlertLevel::Warning),
+                None,
+            ) if value >= rule.warning * (1.0 - band) => Some(AlertLevel::Warning),
+            (_, _, next) => next,
+        }
+    }
+
+    fn alert_message(rule_id: &str, level: AlertLevel, value: f64) -> String {
+        let level_text = match level {
+            AlertLevel::Warning => "warning",
+            AlertLevel::Critical => "critical",
+        };
+        format!("{rule_id}: {level_text} at {value:.3}")
+    }
+
+    pub fn set_run_comparison_snapshot(&mut self, baseline: Vec<TrainingMetrics>) {
+        let capacity = self.config.history_size;
+        let mut by_step: HashMap<u64, TrainingMetrics> = HashMap::new();
+        let mut ordered_without_step = Vec::new();
+
+        for metrics in baseline {
+            if let Some(step) = metrics.step {
+                by_step.insert(step, metrics);
+            } else {
+                ordered_without_step.push(metrics);
+            }
+        }
+
+        self.run_comparison.baseline_loss_history.clear();
+        self.run_comparison.baseline_lr_history.clear();
+        self.run_comparison.baseline_step_history.clear();
+        self.run_comparison.baseline_step_loss_points.clear();
+        self.run_comparison.baseline_step_lr_points.clear();
+        self.run_comparison.baseline_step_loss_map.clear();
+        self.run_comparison.baseline_step_lr_map.clear();
+
+        if !by_step.is_empty() {
+            let mut steps = by_step.keys().copied().collect::<Vec<_>>();
+            steps.sort_unstable();
+            for step in steps {
+                if let Some(metrics) = by_step.get(&step) {
+                    Self::push_bounded(
+                        &mut self.run_comparison.baseline_step_history,
+                        step,
+                        capacity,
+                    );
+                    if let Some(loss) = metrics.loss {
+                        let scaled = Self::scale_to_u64(loss, 1000.0);
+                        Self::push_bounded(
+                            &mut self.run_comparison.baseline_loss_history,
+                            scaled,
+                            capacity,
+                        );
+                        Self::push_bounded_pair(
+                            &mut self.run_comparison.baseline_step_loss_points,
+                            (step, scaled),
+                            capacity,
+                        );
+                        self.run_comparison
+                            .baseline_step_loss_map
+                            .insert(step, scaled);
+                    }
+                    if let Some(lr) = metrics.learning_rate {
+                        let scaled = Self::scale_to_u64(lr, 1_000_000.0);
+                        Self::push_bounded(
+                            &mut self.run_comparison.baseline_lr_history,
+                            scaled,
+                            capacity,
+                        );
+                        Self::push_bounded_pair(
+                            &mut self.run_comparison.baseline_step_lr_points,
+                            (step, scaled),
+                            capacity,
+                        );
+                        self.run_comparison
+                            .baseline_step_lr_map
+                            .insert(step, scaled);
+                    }
+                }
+            }
+        } else {
+            for (idx, metrics) in ordered_without_step.into_iter().enumerate() {
+                Self::push_bounded(
+                    &mut self.run_comparison.baseline_step_history,
+                    idx as u64,
+                    capacity,
+                );
+                if let Some(loss) = metrics.loss {
+                    let scaled = Self::scale_to_u64(loss, 1000.0);
+                    Self::push_bounded(
+                        &mut self.run_comparison.baseline_loss_history,
+                        scaled,
+                        capacity,
+                    );
+                }
+                if let Some(lr) = metrics.learning_rate {
+                    let scaled = Self::scale_to_u64(lr, 1_000_000.0);
+                    Self::push_bounded(
+                        &mut self.run_comparison.baseline_lr_history,
+                        scaled,
+                        capacity,
+                    );
+                }
+            }
+        }
+
+        self.run_comparison.snapshot_mode = true;
+    }
+
+    pub fn run_comparison_snapshot_mode(&self) -> bool {
+        self.run_comparison.snapshot_mode
+    }
+
+    pub fn run_compare_alignment_by_step(&self) -> Vec<(u64, Option<u64>, Option<u64>)> {
+        if self.training.step_loss_points.is_empty()
+            || self.run_comparison.baseline_step_loss_map.is_empty()
+        {
+            return Vec::new();
+        }
+
+        let current = self
+            .training
+            .step_loss_points
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        let baseline = &self.run_comparison.baseline_step_loss_map;
+
+        let mut all_steps = current
+            .keys()
+            .chain(baseline.keys())
+            .copied()
+            .collect::<Vec<_>>();
+        all_steps.sort_unstable();
+        all_steps.dedup();
+
+        all_steps
+            .into_iter()
+            .map(|step| {
+                (
+                    step,
+                    current.get(&step).copied(),
+                    baseline.get(&step).copied(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn run_compare_fallback_alignment(&self) -> Vec<(Option<u64>, Option<u64>)> {
+        let current = self
+            .training
+            .loss_history
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let baseline = self
+            .run_comparison
+            .baseline_loss_history
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let max_len = current.len().max(baseline.len());
+        if max_len == 0 {
+            return Vec::new();
+        }
+
+        (0..max_len)
+            .map(|idx| {
+                let current_idx = if current.is_empty() {
+                    None
+                } else {
+                    Some(idx * current.len().saturating_sub(1) / max_len.saturating_sub(1).max(1))
+                };
+                let baseline_idx = if baseline.is_empty() {
+                    None
+                } else {
+                    Some(idx * baseline.len().saturating_sub(1) / max_len.saturating_sub(1).max(1))
+                };
+                (
+                    current_idx.and_then(|i| current.get(i).copied()),
+                    baseline_idx.and_then(|i| baseline.get(i).copied()),
+                )
+            })
+            .collect()
+    }
+
+    pub fn run_compare_latest_loss_delta(&self) -> Option<f64> {
+        let latest = self.training.latest.as_ref()?;
+        let step = latest.step?;
+        let current_loss = latest.loss?;
+        if let Some(baseline_scaled) = self.run_comparison.baseline_step_loss_map.get(&step) {
+            return Some(current_loss - (*baseline_scaled as f64 / 1000.0));
+        }
+        None
+    }
+
+    pub fn run_compare_latest_lr_delta(&self) -> Option<f64> {
+        let latest = self.training.latest.as_ref()?;
+        let step = latest.step?;
+        let current_lr = latest.learning_rate?;
+        let baseline = self
+            .run_comparison
+            .baseline_step_lr_map
+            .get(&step)
+            .copied()? as f64
+            / 1_000_000.0;
+        Some(current_lr - baseline)
+    }
+
     pub fn push_system(&mut self, s: SystemMetrics) {
         let capacity = self.config.history_size;
 
@@ -1032,6 +1657,13 @@ impl App {
     }
 
     fn push_bounded(buf: &mut VecDeque<u64>, value: u64, capacity: usize) {
+        buf.push_back(value);
+        if buf.len() > capacity {
+            buf.pop_front();
+        }
+    }
+
+    fn push_bounded_pair(buf: &mut VecDeque<(u64, u64)>, value: (u64, u64), capacity: usize) {
         buf.push_back(value);
         if buf.len() > capacity {
             buf.pop_front();
@@ -1096,11 +1728,17 @@ impl App {
         }
 
         let width = width.max(1);
-        let zoom_factor = 1usize << viewport.zoom_level.min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
-        let window = width.saturating_mul(zoom_factor).max(1);
         let history_len = history.len();
+        let zoom_level = viewport.zoom_level.min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
+
+        let window = if zoom_level == 0 {
+            history_len
+        } else {
+            let zoom_divisor = 1usize << zoom_level;
+            history_len.div_ceil(zoom_divisor).max(width)
+        };
         let max_start = history_len.saturating_sub(window);
-        let offset = if viewport.follow_latest {
+        let offset = if viewport.follow_latest || zoom_level == 0 {
             0
         } else {
             viewport.offset_samples.min(max_start)
@@ -1118,8 +1756,64 @@ impl App {
             return sampled;
         }
 
-        let step = sampled.len().div_ceil(width);
-        sampled.into_iter().step_by(step).take(width).collect()
+        Self::downsample_to_width(&sampled, width)
+    }
+
+    fn downsample_to_width(sampled: &[u64], width: usize) -> Vec<u64> {
+        if sampled.len() <= width {
+            return sampled.to_vec();
+        }
+        if width <= 1 {
+            return vec![sampled[sampled.len() - 1]];
+        }
+        if width == 2 {
+            return vec![sampled[0], sampled[sampled.len() - 1]];
+        }
+
+        let mut out = Vec::with_capacity(width);
+        out.push(sampled[0]);
+
+        let interior_slots = width - 2;
+        let interior_len = sampled.len() - 2;
+        let bucket_count = interior_slots.div_ceil(2).max(1);
+
+        for bucket in 0..bucket_count {
+            let start = 1 + (bucket * interior_len / bucket_count);
+            let end = 1 + ((bucket + 1) * interior_len / bucket_count);
+            if start >= end {
+                continue;
+            }
+
+            let mut min_idx = start;
+            let mut max_idx = start;
+            for idx in (start + 1)..end {
+                if sampled[idx] < sampled[min_idx] {
+                    min_idx = idx;
+                }
+                if sampled[idx] > sampled[max_idx] {
+                    max_idx = idx;
+                }
+            }
+
+            if min_idx <= max_idx {
+                out.push(sampled[min_idx]);
+                if max_idx != min_idx {
+                    out.push(sampled[max_idx]);
+                }
+            } else {
+                out.push(sampled[max_idx]);
+                out.push(sampled[min_idx]);
+            }
+        }
+
+        out.truncate(width - 1);
+        while out.len() < width - 1 {
+            let idx = out.len() * (sampled.len() - 2) / (width - 2) + 1;
+            out.push(sampled[idx.min(sampled.len() - 2)]);
+        }
+
+        out.push(sampled[sampled.len() - 1]);
+        out
     }
 }
 
@@ -1169,7 +1863,7 @@ mod tests {
         assert_eq!(app.training.nan_inf_count, 0);
         assert!(app.training.last_loss_spike_at.is_none());
         assert!(app.training.last_nan_inf_at.is_none());
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
         assert_eq!(app.ui_state.mode, AppMode::Monitoring);
         assert!(app.ui_state.selected_file.is_none());
         assert_eq!(app.ui_state.scanning_frame, 0);
@@ -1330,7 +2024,7 @@ mod tests {
         app.ui_state.mode = AppMode::Monitoring;
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
     }
 
     #[test]
@@ -1498,12 +2192,14 @@ mod tests {
 
         app.ui_state.training_viewport.follow_latest = false;
         app.ui_state.system_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = 1;
+        app.ui_state.system_viewport.zoom_level = 1;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(
@@ -1581,7 +2277,7 @@ mod tests {
             keymap_profile: "vim".to_string(),
             ..Config::default()
         });
-        app.ui_state.selected_tab = Tab::Dashboard;
+        app.ui_state.selected_tab = Tab::Main;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -1592,7 +2288,7 @@ mod tests {
         };
 
         assert_eq!(selected_row, 1);
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
     }
 
     #[test]
@@ -1794,30 +2490,24 @@ mod tests {
     #[test]
     fn test_tab_cycle_forward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
 
         let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::System);
-
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Advanced);
-
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard); // wrap
+        assert_eq!(app.ui_state.selected_tab, Tab::Main); // wrap
     }
 
     #[test]
     fn test_tab_cycle_backward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
 
         let backtab_key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         app.handle_key(backtab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Advanced); // wrap around
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics); // wrap around
     }
 
     #[test]
@@ -1826,47 +2516,43 @@ mod tests {
 
         let key1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
         app.handle_key(key1);
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
 
         let key2 = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
         app.handle_key(key2);
-        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
 
         let key3 = KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE);
         app.handle_key(key3);
-        assert_eq!(app.ui_state.selected_tab, Tab::System);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
 
         let key4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE);
         app.handle_key(key4);
-        assert_eq!(app.ui_state.selected_tab, Tab::Advanced);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
     }
 
     #[test]
-    fn test_tab_iteration_count_is_4() {
+    fn test_tab_iteration_count_is_2() {
         let tabs: Vec<Tab> = Tab::iter().collect();
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 2);
     }
 
     #[test]
-    fn test_tab_cycle_forward_wraps_with_advanced() {
+    fn test_tab_cycle_forward_wraps_with_diagnostics() {
         let mut app = App::new(Config::default());
         let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::System);
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Advanced);
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
     }
 
     #[test]
-    fn test_direct_tab_jump_4_opens_advanced() {
+    fn test_direct_tab_jump_4_routes_to_diagnostics() {
         let mut app = App::new(Config::default());
         app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Advanced);
+        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
     }
 
     #[test]
@@ -1933,12 +2619,13 @@ mod tests {
         }
 
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.ui_state.training_viewport.zoom_level = 1;
         app.ui_state.training_viewport.offset_samples = usize::MAX;
 
         let series = app.training_viewport_series(&app.training.step_history, 10);
         assert_eq!(series.len(), 10);
         assert_eq!(series.first().copied(), Some(0));
-        assert_eq!(series.last().copied(), Some(9));
+        assert_eq!(series.last().copied(), Some(24));
     }
 
     #[test]
@@ -1954,27 +2641,257 @@ mod tests {
 
         let baseline = app.training_viewport_series(&app.training.step_history, 16);
         assert_eq!(baseline.len(), 16);
+        assert_eq!(baseline.first().copied(), Some(0));
+        assert_eq!(baseline.last().copied(), Some(255));
 
         for _ in 0..20 {
             app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+
+        let zoomed_out = app.training_viewport_series(&app.training.step_history, 16);
+        assert_eq!(zoomed_out.len(), 16);
+        assert_eq!(zoomed_out, baseline);
+
+        for _ in 0..20 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE));
         }
         assert_eq!(
             app.ui_state.training_viewport.zoom_level,
             App::VIEWPORT_MAX_ZOOM_LEVEL
         );
 
-        let zoomed_out = app.training_viewport_series(&app.training.step_history, 16);
-        assert_eq!(zoomed_out.len(), 16);
-        assert_ne!(zoomed_out.first(), baseline.first());
-
-        for _ in 0..20 {
-            app.handle_key(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE));
-        }
-        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
-
         let zoomed_in = app.training_viewport_series(&app.training.step_history, 16);
         assert_eq!(zoomed_in.len(), 16);
+        assert_ne!(zoomed_in.first(), baseline.first());
         assert_eq!(zoomed_in.last().copied(), Some(255));
+    }
+
+    #[test]
+    fn test_sampling_is_deterministic_for_same_input() {
+        let history = (0..512)
+            .map(|i| if i % 3 == 0 { 100 } else { 10 })
+            .collect::<VecDeque<_>>();
+        let viewport = ViewportState {
+            follow_latest: true,
+            offset_samples: 0,
+            zoom_level: 0,
+        };
+
+        let first = App::viewport_series(&history, viewport, 32);
+        let second = App::viewport_series(&history, viewport, 32);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_sampling_preserves_extrema_per_bucket() {
+        let mut history = VecDeque::new();
+        for _ in 0..32 {
+            history.push_back(10);
+            history.push_back(90);
+            history.push_back(20);
+            history.push_back(80);
+        }
+
+        let viewport = ViewportState {
+            follow_latest: true,
+            offset_samples: 0,
+            zoom_level: 0,
+        };
+        let sampled = App::viewport_series(&history, viewport, 24);
+
+        assert_eq!(sampled.len(), 24);
+        assert!(sampled.contains(&10));
+        assert!(sampled.contains(&90));
+    }
+
+    #[test]
+    fn test_zoom_out_high_frequency_stream_no_jitter_regression() {
+        let mut history = VecDeque::new();
+        for i in 0..400 {
+            history.push_back(if i % 2 == 0 { 0 } else { 100 });
+        }
+
+        let viewport = ViewportState {
+            follow_latest: true,
+            offset_samples: 0,
+            zoom_level: 0,
+        };
+
+        let before = App::viewport_series(&history, viewport, 40);
+        history.push_back(55);
+        let after = App::viewport_series(&history, viewport, 40);
+
+        assert_eq!(before.len(), 40);
+        assert_eq!(after.len(), 40);
+        assert_eq!(before.first(), after.first());
+        assert_ne!(before.last(), after.last());
+    }
+
+    #[test]
+    fn test_append_stream_sampling_avoids_stride_jump_regressions() {
+        let viewport = ViewportState {
+            follow_latest: true,
+            offset_samples: 0,
+            zoom_level: 0,
+        };
+
+        for end in 21..120 {
+            let history = (0..end as u64).collect::<VecDeque<_>>();
+            let sampled = App::viewport_series(&history, viewport, 20);
+
+            assert_eq!(sampled.len(), 20);
+            assert_eq!(sampled.first().copied(), Some(0));
+            assert_eq!(sampled.last().copied(), Some(end as u64 - 1));
+            assert!(sampled.windows(2).all(|w| w[0] <= w[1]));
+        }
+    }
+
+    #[test]
+    fn test_sampling_handles_minimum_width_without_panic() {
+        let history = (10..90).collect::<VecDeque<_>>();
+        let viewport = ViewportState {
+            follow_latest: true,
+            offset_samples: 0,
+            zoom_level: 0,
+        };
+
+        let width_one = App::viewport_series(&history, viewport, 1);
+        assert_eq!(width_one.len(), 1);
+        assert_eq!(width_one[0], 89);
+
+        let width_two = App::viewport_series(&history, viewport, 2);
+        assert_eq!(width_two, vec![10, 89]);
+    }
+
+    #[test]
+    fn test_startup_autofit_sets_follow_latest_and_zero_offset() {
+        let app = App::new(Config::default());
+
+        assert!(app.ui_state.training_viewport.follow_latest);
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert!(app.ui_state.system_viewport.follow_latest);
+        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.system_viewport.zoom_level, 0);
+    }
+
+    #[test]
+    fn test_startup_default_is_min_zoom_follow_latest() {
+        let mut app = App::new(Config::default());
+        for i in 0..100 {
+            app.push_metrics(TrainingMetrics {
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        let series = app.training_viewport_series(&app.training.step_history, 10);
+        assert_eq!(series.len(), 10);
+        assert_eq!(series.first().copied(), Some(0));
+        assert_eq!(series.last().copied(), Some(99));
+    }
+
+    #[test]
+    fn test_min_zoom_autofit_disables_pan() {
+        let mut app = App::new(Config::default());
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.system_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = 0;
+        app.ui_state.system_viewport.zoom_level = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+    }
+
+    #[test]
+    fn test_min_zoom_pan_input_is_noop() {
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.system_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = 0;
+        app.ui_state.system_viewport.zoom_level = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+    }
+
+    #[test]
+    fn test_resize_reautofit_only_when_min_zoom_follow_latest() {
+        let mut app = App::new(Config::default());
+        for i in 0..80 {
+            app.push_metrics(TrainingMetrics {
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        let wide = app.training_viewport_series(&app.training.step_history, 20);
+        let narrow = app.training_viewport_series(&app.training.step_history, 8);
+
+        assert_eq!(wide.first().copied(), Some(0));
+        assert_eq!(wide.last().copied(), Some(79));
+        assert_eq!(narrow.first().copied(), Some(0));
+        assert_eq!(narrow.last().copied(), Some(79));
+
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = 1;
+        app.ui_state.training_viewport.offset_samples = 15;
+        let before = app.ui_state.training_viewport.offset_samples;
+        let _ = app.training_viewport_series(&app.training.step_history, 12);
+        let _ = app.training_viewport_series(&app.training.step_history, 6);
+
+        assert_eq!(app.ui_state.training_viewport.offset_samples, before);
+    }
+
+    #[test]
+    fn test_resize_while_paused_preserves_non_min_viewport() {
+        let mut app = App::new(Config::default());
+        for i in 0..80 {
+            app.push_metrics(TrainingMetrics {
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = 2;
+        app.ui_state.training_viewport.offset_samples = 11;
+        let before = app.ui_state.training_viewport.offset_samples;
+
+        let _ = app.training_viewport_series(&app.training.step_history, 18);
+        let _ = app.training_viewport_series(&app.training.step_history, 7);
+
+        assert_eq!(app.ui_state.training_viewport.offset_samples, before);
+    }
+
+    #[test]
+    fn test_reset_g_restores_min_zoom_autofit_contract() {
+        let mut app = App::new(Config::default());
+        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.system_viewport.follow_latest = false;
+        app.ui_state.training_viewport.zoom_level = App::VIEWPORT_MAX_ZOOM_LEVEL;
+        app.ui_state.system_viewport.zoom_level = App::VIEWPORT_MAX_ZOOM_LEVEL;
+        app.ui_state.training_viewport.offset_samples = 42;
+        app.ui_state.system_viewport.offset_samples = 42;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+
+        assert!(app.ui_state.training_viewport.follow_latest);
+        assert!(app.ui_state.system_viewport.follow_latest);
+        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert_eq!(app.ui_state.system_viewport.zoom_level, 0);
     }
 
     #[test]
@@ -2217,10 +3134,341 @@ mod tests {
     }
 
     #[test]
+    fn test_alerts_disabled_when_unconfigured() {
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(1.0),
+            ..TrainingMetrics::default()
+        });
+        app.on_tick();
+        assert!(app.alerts.active.is_empty());
+        assert!(app.alerts.resolved.is_empty());
+    }
+
+    #[test]
+    fn test_alerts_clear_when_rules_removed_or_disabled() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_drop".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.alerts.active.len(), 1);
+
+        app.config.alert_rules.clear();
+        app.on_tick();
+        assert!(app.alerts.active.is_empty());
+
+        app.config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_drop".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: false,
+        }];
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        app.on_tick();
+        assert!(app.alerts.active.is_empty());
+    }
+
+    #[test]
+    fn test_alert_threshold_warning_and_critical_transitions() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_drop".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(90.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.alerts.active.len(), 1);
+        assert_eq!(app.alerts.active[0].level, AlertLevel::Warning);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.alerts.active[0].level, AlertLevel::Critical);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(140.0),
+            ..TrainingMetrics::default()
+        });
+        assert!(app.alerts.active.is_empty());
+        assert_eq!(app.alerts.resolved.len(), 1);
+    }
+
+    #[test]
+    fn test_alert_threshold_hysteresis_prevents_flapping() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("memory_pressure".to_string()),
+            kind: AlertRuleKind::MemoryPressure,
+            mode: AlertEvalMode::Current,
+            warning: 80.0,
+            critical: 90.0,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        app.push_system(SystemMetrics {
+            cpu_usage: 50.0,
+            memory_used: 82,
+            memory_total: 100,
+            gpus: vec![],
+        });
+        app.on_tick();
+        assert_eq!(app.alerts.active.len(), 1);
+
+        app.push_system(SystemMetrics {
+            cpu_usage: 50.0,
+            memory_used: 78,
+            memory_total: 100,
+            gpus: vec![],
+        });
+        app.on_tick();
+
+        assert_eq!(app.alerts.active.len(), 1);
+        assert!(app.alerts.resolved.is_empty());
+    }
+
+    #[test]
+    fn test_alert_cooldown_blocks_immediate_refire_then_allows_reentry() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_drop".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.alerts.active.len(), 1);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(140.0),
+            ..TrainingMetrics::default()
+        });
+        assert!(app.alerts.active.is_empty());
+        assert_eq!(app.alerts.resolved.len(), 1);
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        assert!(app.alerts.active.is_empty());
+
+        for _ in 0..30 {
+            app.on_tick();
+        }
+
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        assert_eq!(app.alerts.active.len(), 1);
+        assert_eq!(app.alerts.active[0].rule_id, "throughput_drop");
+    }
+
+    #[test]
+    fn test_loss_trend_worsening_uses_rolling_mean_slope_formula() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("loss_trend_worsening".to_string()),
+            kind: AlertRuleKind::LossTrendWorsening,
+            mode: AlertEvalMode::RollingMean { window: 10 },
+            warning: 0.001,
+            critical: 0.003,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        for i in 0..40 {
+            app.push_metrics(TrainingMetrics {
+                loss: Some(0.5 + (i as f64 * 0.01)),
+                step: Some(i),
+                ..TrainingMetrics::default()
+            });
+        }
+
+        assert!(!app.alerts.active.is_empty());
+        assert_eq!(app.alerts.active[0].rule_id, "loss_trend_worsening");
+    }
+
+    #[test]
+    fn test_run_compare_alignment_by_step() {
+        let mut app = App::new(Config::default());
+        for i in 1..=3 {
+            app.push_metrics(TrainingMetrics {
+                step: Some(i),
+                loss: Some(i as f64),
+                ..TrainingMetrics::default()
+            });
+        }
+        app.set_run_comparison_snapshot(vec![
+            TrainingMetrics {
+                step: Some(2),
+                loss: Some(5.0),
+                ..TrainingMetrics::default()
+            },
+            TrainingMetrics {
+                step: Some(3),
+                loss: Some(6.0),
+                ..TrainingMetrics::default()
+            },
+        ]);
+
+        let aligned = app.run_compare_alignment_by_step();
+        assert!(
+            aligned
+                .iter()
+                .any(|(step, c, b)| *step == 2 && c.is_some() && b.is_some())
+        );
+    }
+
+    #[test]
+    fn test_run_compare_fallback_alignment_when_step_missing() {
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            loss: Some(1.0),
+            ..TrainingMetrics::default()
+        });
+        app.push_metrics(TrainingMetrics {
+            loss: Some(2.0),
+            ..TrainingMetrics::default()
+        });
+        app.set_run_comparison_snapshot(vec![
+            TrainingMetrics {
+                loss: Some(2.5),
+                ..TrainingMetrics::default()
+            },
+            TrainingMetrics {
+                loss: Some(3.5),
+                ..TrainingMetrics::default()
+            },
+        ]);
+
+        let aligned = app.run_compare_fallback_alignment();
+        assert_eq!(aligned.len(), 2);
+        assert!(aligned[0].0.is_some());
+        assert!(aligned[0].1.is_some());
+    }
+
+    #[test]
+    fn test_run_compare_uses_snapshot_mode_without_follow_tail() {
+        let mut app = App::new(Config::default());
+        app.set_run_comparison_snapshot(vec![TrainingMetrics {
+            step: Some(1),
+            loss: Some(1.0),
+            ..TrainingMetrics::default()
+        }]);
+        let before = app.run_comparison.baseline_loss_history.len();
+
+        app.push_metrics(TrainingMetrics {
+            step: Some(2),
+            loss: Some(0.9),
+            ..TrainingMetrics::default()
+        });
+
+        assert!(app.run_comparison_snapshot_mode());
+        assert_eq!(app.run_comparison.baseline_loss_history.len(), before);
+    }
+
+    #[test]
+    fn test_run_compare_duplicate_steps_keep_last_seen_deterministically() {
+        let mut app = App::new(Config::default());
+        app.set_run_comparison_snapshot(vec![
+            TrainingMetrics {
+                step: Some(10),
+                loss: Some(1.0),
+                ..TrainingMetrics::default()
+            },
+            TrainingMetrics {
+                step: Some(10),
+                loss: Some(2.0),
+                ..TrainingMetrics::default()
+            },
+        ]);
+        assert_eq!(app.run_comparison.baseline_step_history.len(), 1);
+        assert_eq!(
+            app.run_comparison.baseline_loss_history.back().copied(),
+            Some(2000)
+        );
+    }
+
+    #[test]
+    fn test_two_tab_key_docs_contract() {
+        let entries = keymap_entries("default");
+        assert!(
+            entries
+                .iter()
+                .any(|(key, desc)| key == "1/2 (3/4 legacy)" && desc == "Jump to tab")
+        );
+    }
+
+    #[test]
+    fn test_min_zoom_alerts_and_compare_coexist_without_panics() {
+        let mut config = Config::default();
+        config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_drop".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: true,
+        }];
+        let mut app = App::new(config);
+
+        app.set_run_comparison_snapshot(vec![TrainingMetrics {
+            step: Some(1),
+            loss: Some(1.0),
+            ..TrainingMetrics::default()
+        }]);
+        app.push_metrics(TrainingMetrics {
+            step: Some(1),
+            loss: Some(0.8),
+            throughput: Some(40.0),
+            ..TrainingMetrics::default()
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.on_tick();
+
+        let _ = app.training_viewport_series(&app.training.loss_history, 8);
+        let _ = app.run_compare_alignment_by_step();
+        assert!(app.ui_state.training_viewport.zoom_level == 0);
+    }
+
+    #[test]
     fn test_app_new() {
         let app = App::new(Config::default());
         assert!(app.running);
-        assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+        assert_eq!(app.ui_state.selected_tab, Tab::Main);
         assert!(app.training.latest.is_none());
     }
 }
