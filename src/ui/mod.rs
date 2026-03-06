@@ -1,17 +1,22 @@
 pub mod advanced;
 pub mod dashboard;
+pub mod events_notes;
 pub mod file_picker;
+pub mod graph;
 pub mod header;
 pub mod help;
+pub mod home;
 pub mod metrics;
+pub mod run_explorer;
 pub mod settings;
 pub mod system;
+pub mod system_processes;
 pub mod theme;
 
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::app::{App, AppMode};
+use crate::app::{App, AppMode, PrimaryView};
 use crate::ui::theme::resolve_palette_from_config;
 
 // Base palette — dark terminal friendly
@@ -35,14 +40,10 @@ pub const MIN_HEIGHT: u16 = 20;
 // Tab enum with strum derives
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter, strum::FromRepr, strum::Display)]
 pub enum Tab {
-    #[strum(serialize = "Dashboard")]
-    Dashboard = 0,
-    #[strum(serialize = "Metrics")]
-    Metrics = 1,
-    #[strum(serialize = "System")]
-    System = 2,
-    #[strum(serialize = "Advanced")]
-    Advanced = 3,
+    #[strum(serialize = "Main")]
+    Main = 0,
+    #[strum(serialize = "Diagnostics")]
+    Diagnostics = 1,
 }
 
 // Semantic style helper functions
@@ -64,6 +65,16 @@ pub fn metric_label_style() -> Style {
 
 pub fn metric_value_style() -> Style {
     Style::default().fg(ACCENT)
+}
+
+pub fn phase1_primary_views() -> [PrimaryView; 5] {
+    [
+        PrimaryView::Home,
+        PrimaryView::LiveRun,
+        PrimaryView::RunExplorer,
+        PrimaryView::EventsNotes,
+        PrimaryView::SystemProcesses,
+    ]
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -103,11 +114,15 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::FilePicker(state) => file_picker::render_picker(frame, content_area, state, app),
         AppMode::Help(state) => help::render(frame, content_area, state),
         AppMode::Settings(state) => settings::render(frame, content_area, state),
-        AppMode::Monitoring => match app.ui_state.selected_tab {
-            Tab::Dashboard => dashboard::render(frame, content_area, app),
-            Tab::Metrics => metrics::render(frame, content_area, app),
-            Tab::System => system::render(frame, content_area, app),
-            Tab::Advanced => advanced::render(frame, content_area, app),
+        AppMode::Monitoring => match app.ui_state.primary_view {
+            PrimaryView::Home => home::render(frame, content_area, app),
+            PrimaryView::LiveRun => match app.ui_state.selected_tab {
+                Tab::Main => metrics::render(frame, content_area, app),
+                Tab::Diagnostics => advanced::render(frame, content_area, app),
+            },
+            PrimaryView::RunExplorer => run_explorer::render(frame, content_area, app),
+            PrimaryView::EventsNotes => events_notes::render(frame, content_area, app),
+            PrimaryView::SystemProcesses => system_processes::render(frame, content_area, app),
         },
     }
 
@@ -130,7 +145,7 @@ fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
     let minutes = (elapsed.as_secs() % 3600) / 60;
     let seconds = elapsed.as_secs() % 60;
     let key_hints = match &app.ui_state.mode {
-        AppMode::Monitoring => "?:help s:settings Tab:tabs Space:live/pause q:quit",
+        AppMode::Monitoring => "?:help s:settings 5-9:views Tab:subtabs Space:live/pause q:quit",
         AppMode::Settings(_) => {
             "?:help Up/Down:row Left/Right:change a:apply w/Enter:save Esc:cancel"
         }
@@ -153,8 +168,9 @@ fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
     };
 
     let text = format!(
-        " [{}] | {} | Parser: {} | Keymap: {} | Data: {} | Elapsed: {:02}:{:02}:{:02} | {}",
+        " [{}] | View: {} | {} | Parser: {} | Keymap: {} | Data: {} | Elapsed: {:02}:{:02}:{:02} | {}",
         status,
+        app.ui_state.primary_view.label(),
         viewport_status,
         app.config.parser,
         app.config.keymap_profile,
@@ -180,58 +196,41 @@ mod tests {
     use strum::IntoEnumIterator;
 
     #[test]
-    fn test_tab_from_repr_dashboard() {
-        assert_eq!(Tab::from_repr(0), Some(Tab::Dashboard));
+    fn test_tab_from_repr_main() {
+        assert_eq!(Tab::from_repr(0), Some(Tab::Main));
     }
 
     #[test]
-    fn test_tab_from_repr_metrics() {
-        assert_eq!(Tab::from_repr(1), Some(Tab::Metrics));
-    }
-
-    #[test]
-    fn test_tab_from_repr_system() {
-        assert_eq!(Tab::from_repr(2), Some(Tab::System));
+    fn test_tab_from_repr_diagnostics() {
+        assert_eq!(Tab::from_repr(1), Some(Tab::Diagnostics));
     }
 
     #[test]
     fn test_tab_from_repr_invalid() {
-        assert_eq!(Tab::from_repr(4), None);
+        assert_eq!(Tab::from_repr(2), None);
     }
 
     #[test]
     fn test_tab_iteration_count() {
         let tabs: Vec<Tab> = Tab::iter().collect();
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 2);
     }
 
     #[test]
     fn test_tab_iteration_contains_all() {
         let tabs: Vec<Tab> = Tab::iter().collect();
-        assert!(tabs.contains(&Tab::Dashboard));
-        assert!(tabs.contains(&Tab::Metrics));
-        assert!(tabs.contains(&Tab::System));
-        assert!(tabs.contains(&Tab::Advanced));
+        assert!(tabs.contains(&Tab::Main));
+        assert!(tabs.contains(&Tab::Diagnostics));
     }
 
     #[test]
-    fn test_tab_display_dashboard() {
-        assert_eq!(Tab::Dashboard.to_string(), "Dashboard");
+    fn test_tab_display_main() {
+        assert_eq!(Tab::Main.to_string(), "Main");
     }
 
     #[test]
-    fn test_tab_display_metrics() {
-        assert_eq!(Tab::Metrics.to_string(), "Metrics");
-    }
-
-    #[test]
-    fn test_tab_display_system() {
-        assert_eq!(Tab::System.to_string(), "System");
-    }
-
-    #[test]
-    fn test_tab_display_advanced() {
-        assert_eq!(Tab::Advanced.to_string(), "Advanced");
+    fn test_tab_display_diagnostics() {
+        assert_eq!(Tab::Diagnostics.to_string(), "Diagnostics");
     }
 
     #[test]
@@ -491,7 +490,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.selected_tab = Tab::Advanced;
+        app.ui_state.selected_tab = Tab::Diagnostics;
 
         app.push_metrics(TrainingMetrics {
             loss: Some(0.9),
@@ -526,7 +525,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.selected_tab = Tab::Advanced;
+        app.ui_state.selected_tab = Tab::Diagnostics;
 
         app.push_metrics(TrainingMetrics {
             tokens_per_second: Some(1400.0),
@@ -560,7 +559,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.selected_tab = Tab::Advanced;
+        app.ui_state.selected_tab = Tab::Diagnostics;
 
         app.push_metrics(TrainingMetrics {
             eval_loss: Some(0.8),
@@ -577,5 +576,176 @@ mod tests {
 
         app.config.graph_mode = "line".to_string();
         terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn test_main_tab_contains_primary_training_kpis() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_tab = Tab::Main;
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.5),
+            learning_rate: Some(1e-4),
+            step: Some(100),
+            throughput: Some(1200.0),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Loss:"));
+        assert!(content.contains("Learning Rate:"));
+        assert!(content.contains("Core"));
+    }
+
+    #[test]
+    fn test_diagnostics_tab_contains_system_and_parser_panels() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_tab = Tab::Diagnostics;
+        app.push_metrics(TrainingMetrics {
+            eval_loss: Some(0.8),
+            grad_norm: Some(1.2),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+        app.push_system(crate::types::SystemMetrics {
+            cpu_usage: 52.0,
+            memory_used: 4,
+            memory_total: 8,
+            gpus: vec![],
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Parser ok/skip/err"));
+        assert!(content.contains("CPU/RAM/GPU"));
+    }
+
+    #[test]
+    fn test_no_duplicate_primary_panel_between_tabs() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.5),
+            learning_rate: Some(1e-4),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+
+        app.ui_state.selected_tab = Tab::Main;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let main_buffer = terminal.backend().buffer().clone();
+        let main_content = (0..main_buffer.area.height)
+            .map(|y| {
+                (0..main_buffer.area.width)
+                    .map(|x| main_buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        app.ui_state.selected_tab = Tab::Diagnostics;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let diag_buffer = terminal.backend().buffer();
+        let diag_content = (0..diag_buffer.area.height)
+            .map(|y| {
+                (0..diag_buffer.area.width)
+                    .map(|x| diag_buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(main_content.contains("Learning Rate:"));
+        assert!(!diag_content.contains("Learning Rate:"));
+    }
+
+    #[test]
+    fn test_diagnostics_handles_missing_parser_telemetry_gracefully() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_tab = Tab::Diagnostics;
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.7),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Parser ok/skip/err: 0/0/0"));
+    }
+
+    #[test]
+    fn test_diagnostics_shows_active_and_resolved_alerts() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_tab = Tab::Diagnostics;
+        app.push_metrics(TrainingMetrics {
+            loss: Some(0.7),
+            timestamp: Instant::now(),
+            ..TrainingMetrics::default()
+        });
+        app.alerts.active.push(crate::app::AlertRecord {
+            rule_id: "memory_pressure".to_string(),
+            level: crate::app::AlertLevel::Warning,
+            value: 82.0,
+            message: "memory_pressure: warning at 82.000".to_string(),
+            tick: 1,
+        });
+        app.alerts.resolved.push(crate::app::AlertRecord {
+            rule_id: "throughput_drop".to_string(),
+            level: crate::app::AlertLevel::Critical,
+            value: 40.0,
+            message: "resolved at 40.000".to_string(),
+            tick: 2,
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Alerts active/resolved: 1/1"));
     }
 }
