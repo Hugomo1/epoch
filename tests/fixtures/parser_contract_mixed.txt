@@ -1,0 +1,7 @@
+2026-03-05T12:00:00Z INFO starting worker
+{"loss": 1.23, "step": 1, "lr": 0.001, "tokens_per_second": 512.0}
+step=2 loss=1.11 lr=9e-4 throughput=640.5 tokens=2048
+loss,step,lr,throughput
+1.01,3,0.0008,700.0
+\u001b[31mEpoch 1/10\u001b[0m
+not-json at all

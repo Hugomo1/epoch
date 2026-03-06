@@ -11,19 +11,75 @@ use crate::types::TrainingMetrics;
 
 pub struct JsonlParser;
 
+fn extract_value_for_key<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(value) = obj.get(key) {
+        return Some(value);
+    }
+
+    if !key.contains('.') {
+        return None;
+    }
+
+    let mut parts = key.split('.').peekable();
+    let mut current = obj;
+
+    while let Some(part) = parts.next() {
+        let value = current.get(part)?;
+        if parts.peek().is_none() {
+            return Some(value);
+        }
+        current = value.as_object()?;
+    }
+
+    None
+}
+
+fn value_as_f64(value: &serde_json::Value) -> Option<f64> {
+    let parsed = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()));
+    parsed.filter(|n| n.is_finite())
+}
+
+fn value_as_u64(value: &serde_json::Value) -> Option<u64> {
+    fn u64_from_f64(v: f64) -> Option<u64> {
+        if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > u64::MAX as f64 {
+            return None;
+        }
+        Some(v as u64)
+    }
+
+    fn parse_u64_text(text: &str) -> Option<u64> {
+        let trimmed = text.trim();
+        trimmed
+            .parse::<u64>()
+            .ok()
+            .or_else(|| trimmed.parse::<f64>().ok().and_then(u64_from_f64))
+    }
+
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_f64().and_then(u64_from_f64))
+        .or_else(|| value.as_str().and_then(parse_u64_text))
+}
+
 fn try_extract_f64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
     keys.iter()
-        .find_map(|key| obj.get(*key).and_then(|value| value.as_f64()))
+        .find_map(|key| extract_value_for_key(obj, key).and_then(value_as_f64))
 }
 
 fn try_extract_u64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<u64> {
     keys.iter()
-        .find_map(|key| obj.get(*key).and_then(|value| value.as_u64()))
+        .find_map(|key| extract_value_for_key(obj, key).and_then(value_as_u64))
 }
 
 impl LogParser for JsonlParser {
     fn parse_line(&self, line: &str) -> Result<Option<TrainingMetrics>> {
-        let trimmed = line.trim();
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
 
         if trimmed.is_empty() {
             return Ok(None);
@@ -254,6 +310,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_nested_metric_paths() {
+        let parser = JsonlParser;
+        let line = r#"{"train": {"loss": 0.42, "learning_rate": 0.0003, "global_step": 77}, "speed": {"samples_per_second": 12.5}}"#;
+        let result = parser.parse_line(line).expect("parse failed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.loss, Some(0.42));
+        assert_eq!(metrics.learning_rate, Some(0.0003));
+        assert_eq!(metrics.step, Some(77));
+        assert_eq!(metrics.samples_per_second, Some(12.5));
+    }
+
+    #[test]
+    fn test_parse_unknown_nested_objects_are_ignored() {
+        let parser = JsonlParser;
+        let line = r#"{"metrics": {"accuracy": 0.9}, "optimizer": {"beta1": 0.9}}"#;
+        let result = parser.parse_line(line).expect("parse failed");
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn test_original_fields_still_work() {
         let parser = JsonlParser;
         let line =
@@ -288,6 +366,39 @@ mod tests {
         let parser = JsonlParser;
         let result = parser.parse_line("{invalid json").expect("parse failed");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_step_and_tokens_from_integral_float_values() {
+        let parser = JsonlParser;
+        let line = r#"{"step": 100.0, "tokens": "50000.0"}"#;
+        let result = parser.parse_line(line).expect("parse failed");
+
+        assert!(result.is_some());
+        let metrics = result.unwrap();
+        assert_eq!(metrics.step, Some(100));
+        assert_eq!(metrics.tokens, Some(50000));
+    }
+
+    #[test]
+    fn test_parse_rejects_non_integral_u64_values() {
+        let parser = JsonlParser;
+        let line = r#"{"step": 12.5, "tokens": "99.9"}"#;
+        let result = parser.parse_line(line).expect("parse failed");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_jsonl_line_with_utf8_bom_prefix() {
+        let parser = JsonlParser;
+        let line = "\u{feff}{\"loss\": 0.33, \"step\": 9}";
+        let result = parser.parse_line(line).expect("parse failed");
+
+        assert!(result.is_some());
+        let metrics = result.unwrap();
+        assert_eq!(metrics.loss, Some(0.33));
+        assert_eq!(metrics.step, Some(9));
     }
 
     #[test]

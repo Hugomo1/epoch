@@ -8,18 +8,74 @@ use crate::parsers::aliases::{
 };
 use crate::types::TrainingMetrics;
 
+fn extract_value_for_key<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(value) = obj.get(key) {
+        return Some(value);
+    }
+
+    if !key.contains('.') {
+        return None;
+    }
+
+    let mut parts = key.split('.').peekable();
+    let mut current = obj;
+
+    while let Some(part) = parts.next() {
+        let value = current.get(part)?;
+        if parts.peek().is_none() {
+            return Some(value);
+        }
+        current = value.as_object()?;
+    }
+
+    None
+}
+
+fn value_as_f64(value: &serde_json::Value) -> Option<f64> {
+    let parsed = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()));
+    parsed.filter(|n| n.is_finite())
+}
+
+fn value_as_u64(value: &serde_json::Value) -> Option<u64> {
+    fn u64_from_f64(v: f64) -> Option<u64> {
+        if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > u64::MAX as f64 {
+            return None;
+        }
+        Some(v as u64)
+    }
+
+    fn parse_u64_text(text: &str) -> Option<u64> {
+        let trimmed = text.trim();
+        trimmed
+            .parse::<u64>()
+            .ok()
+            .or_else(|| trimmed.parse::<f64>().ok().and_then(u64_from_f64))
+    }
+
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_f64().and_then(u64_from_f64))
+        .or_else(|| value.as_str().and_then(parse_u64_text))
+}
+
 fn try_extract_f64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
     keys.iter()
-        .find_map(|key| obj.get(*key).and_then(|value| value.as_f64()))
+        .find_map(|key| extract_value_for_key(obj, key).and_then(value_as_f64))
 }
 
 fn try_extract_u64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<u64> {
     keys.iter()
-        .find_map(|key| obj.get(*key).and_then(|value| value.as_u64()))
+        .find_map(|key| extract_value_for_key(obj, key).and_then(value_as_u64))
 }
 
 pub fn parse_trainer_state(content: &str) -> Result<Vec<TrainingMetrics>> {
-    let value: serde_json::Value = serde_json::from_str(content)?;
+    let value: serde_json::Value = serde_json::from_str(content.trim_start_matches('\u{feff}'))?;
 
     let Some(log_history) = value.get("log_history").and_then(|v| v.as_array()) else {
         return Ok(vec![]);
@@ -156,5 +212,64 @@ mod tests {
         assert_eq!(metrics.samples_per_second, Some(12.0));
         assert_eq!(metrics.steps_per_second, Some(0.8));
         assert_eq!(metrics.tokens_per_second, Some(2048.0));
+    }
+
+    #[test]
+    fn test_parse_trainer_state_nested_metric_paths() {
+        let content = r#"{
+            "log_history": [
+                {
+                    "train": {"loss": 0.77, "learning_rate": 0.0004, "global_step": 55},
+                    "speed": {"samples_per_second": 14.2}
+                }
+            ]
+        }"#;
+
+        let parsed = parse_trainer_state(content).expect("parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        let metrics = &parsed[0];
+        assert_eq!(metrics.loss, Some(0.77));
+        assert_eq!(metrics.learning_rate, Some(0.0004));
+        assert_eq!(metrics.step, Some(55));
+        assert_eq!(metrics.samples_per_second, Some(14.2));
+    }
+
+    #[test]
+    fn test_parse_trainer_state_accepts_integral_float_step_and_tokens() {
+        let content = r#"{"log_history": [{"step": 42.0, "tokens": "1000.0", "loss": 0.4}]}"#;
+
+        let parsed = parse_trainer_state(content).expect("parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        let metrics = &parsed[0];
+        assert_eq!(metrics.step, Some(42));
+        assert_eq!(metrics.tokens, Some(1000));
+    }
+
+    #[test]
+    fn test_parse_trainer_state_rejects_non_integral_u64_values() {
+        let content = r#"{"log_history": [{"step": 10.5, "tokens": "7.7"}]}"#;
+
+        let parsed = parse_trainer_state(content).expect("parse should succeed");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_trainer_state_with_utf8_bom_prefix() {
+        let content = "\u{feff}{\"log_history\": [{\"loss\": 0.8, \"step\": 3}]}";
+
+        let parsed = parse_trainer_state(content).expect("parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].loss, Some(0.8));
+        assert_eq!(parsed[0].step, Some(3));
+    }
+
+    #[test]
+    fn test_parse_trainer_state_skips_non_object_entries() {
+        let content = r#"{"log_history": ["bad", 7, {"loss": 0.6, "step": 2}]}"#;
+
+        let parsed = parse_trainer_state(content).expect("parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].loss, Some(0.6));
+        assert_eq!(parsed[0].step, Some(2));
     }
 }

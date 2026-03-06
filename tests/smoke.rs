@@ -6,6 +6,9 @@ use epoch::types::{GpuMetrics, SystemMetrics, TrainingMetrics};
 use epoch::ui::Tab;
 use tokio::sync::mpsc;
 
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 #[tokio::test]
 async fn test_app_processes_events_from_channels() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -233,4 +236,36 @@ fn test_tab_cycling_many_times() {
     }
 
     assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+}
+
+#[test]
+fn test_auto_parser_smoke_with_noise_then_csv_header() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("epoch-smoke-auto-parser-{unique}"));
+    fs::create_dir_all(&root).expect("temp directory should be created");
+    let file_path = root.join("train.log");
+
+    fs::write(&file_path, "INFO start\nloss,step,lr\n0.7,11,0.0009\n")
+        .expect("test file should be written");
+
+    let config = Config {
+        parser: "auto".to_string(),
+        log_file: Some(file_path.clone()),
+        ..Config::default()
+    };
+    let parser = create_parser(&config).expect("auto parser should be created");
+
+    let parsed = parser
+        .parse_line("0.6,12,0.0008")
+        .expect("csv row should parse after detection");
+    assert!(parsed.is_some());
+    let metrics = parsed.expect("metrics should exist");
+    assert_eq!(metrics.loss, Some(0.6));
+    assert_eq!(metrics.step, Some(12));
+
+    fs::remove_file(&file_path).expect("test file should be removed");
+    fs::remove_dir_all(&root).expect("temp directory should be removed");
 }

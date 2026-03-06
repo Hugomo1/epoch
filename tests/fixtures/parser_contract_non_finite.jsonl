@@ -1,0 +1,4 @@
+{"loss": "NaN", "step": 1, "lr": "inf"}
+{"loss": null, "step": 2, "throughput": "not-a-number"}
+{"loss": 0.91, "step": 3, "tokens_per_second": 1500.0}
+{"loss": "-inf", "step": 4, "samples_per_second": "nan"}

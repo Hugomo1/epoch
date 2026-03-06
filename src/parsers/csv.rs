@@ -45,7 +45,7 @@ pub struct CsvParser {
 
 impl CsvParser {
     pub fn new(header_line: &str) -> Result<Self> {
-        for delimiter in [b',', b'\t'] {
+        for delimiter in [b',', b'\t', b';', b'|'] {
             if let Some(column_indices) = Self::build_column_map(header_line, delimiter)?
                 && column_indices.has_any()
             {
@@ -67,7 +67,10 @@ impl CsvParser {
         let mut map = CsvColumnMap::default();
 
         for (index, field) in record.iter().enumerate() {
-            let normalized = field.trim().to_ascii_lowercase();
+            let normalized = field
+                .trim()
+                .trim_start_matches('\u{feff}')
+                .to_ascii_lowercase();
 
             if map.loss.is_none() && LOSS_KEYS.contains(&normalized.as_str()) {
                 map.loss = Some(index);
@@ -139,12 +142,24 @@ impl CsvParser {
         index
             .and_then(|idx| record.get(idx))
             .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|n| n.is_finite())
     }
 
     fn parse_u64_field(record: &::csv::StringRecord, index: Option<usize>) -> Option<u64> {
-        index
-            .and_then(|idx| record.get(idx))
-            .and_then(|value| value.trim().parse::<u64>().ok())
+        fn u64_from_f64(v: f64) -> Option<u64> {
+            if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > u64::MAX as f64 {
+                return None;
+            }
+            Some(v as u64)
+        }
+
+        index.and_then(|idx| record.get(idx)).and_then(|value| {
+            let trimmed = value.trim();
+            trimmed
+                .parse::<u64>()
+                .ok()
+                .or_else(|| trimmed.parse::<f64>().ok().and_then(u64_from_f64))
+        })
     }
 }
 
@@ -221,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn test_csv_parser_new_with_semicolon_header() {
+        let parser = CsvParser::new("loss;step;lr");
+        assert!(parser.is_ok());
+    }
+
+    #[test]
+    fn test_csv_parser_new_with_pipe_header() {
+        let parser = CsvParser::new("loss|step|lr");
+        assert!(parser.is_ok());
+    }
+
+    #[test]
     fn test_csv_parser_new_with_aliases() {
         let parser = CsvParser::new("train_loss,global_step,learning_rate");
         assert!(parser.is_ok());
@@ -241,6 +268,34 @@ mod tests {
         let metrics = result.expect("metrics should exist");
         assert_eq!(metrics.loss, Some(0.5));
         assert_eq!(metrics.step, Some(100));
+    }
+
+    #[test]
+    fn test_csv_parse_data_row_with_semicolon_delimiter() {
+        let parser = CsvParser::new("loss;step;lr").expect("parser should be created");
+        let result = parser
+            .parse_line("0.5;100;0.001")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.loss, Some(0.5));
+        assert_eq!(metrics.step, Some(100));
+        assert_eq!(metrics.learning_rate, Some(0.001));
+    }
+
+    #[test]
+    fn test_csv_parse_data_row_with_pipe_delimiter() {
+        let parser = CsvParser::new("loss|step|lr").expect("parser should be created");
+        let result = parser
+            .parse_line("0.6|101|0.0008")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.loss, Some(0.6));
+        assert_eq!(metrics.step, Some(101));
+        assert_eq!(metrics.learning_rate, Some(0.0008));
     }
 
     #[test]
@@ -289,5 +344,58 @@ mod tests {
         assert_eq!(metrics.samples_per_second, Some(12.0));
         assert_eq!(metrics.steps_per_second, Some(0.8));
         assert_eq!(metrics.tokens_per_second, Some(2048.0));
+    }
+
+    #[test]
+    fn test_csv_alias_expansion_for_common_framework_headers() {
+        let parser =
+            CsvParser::new("train.loss,optimizer.lr,train.global_step,speed.samples_per_second")
+                .expect("parser should be created");
+        let result = parser
+            .parse_line("0.6,0.0002,42,18.5")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.loss, Some(0.6));
+        assert_eq!(metrics.learning_rate, Some(0.0002));
+        assert_eq!(metrics.step, Some(42));
+        assert_eq!(metrics.samples_per_second, Some(18.5));
+    }
+
+    #[test]
+    fn test_csv_parse_integral_float_u64_fields() {
+        let parser = CsvParser::new("step,tokens").expect("parser should be created");
+        let result = parser
+            .parse_line("10.0,5000.0")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.step, Some(10));
+        assert_eq!(metrics.tokens, Some(5000));
+    }
+
+    #[test]
+    fn test_csv_parse_rejects_non_integral_u64_fields() {
+        let parser = CsvParser::new("step,tokens").expect("parser should be created");
+        let result = parser
+            .parse_line("10.5,5000.25")
+            .expect("parse should succeed");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_csv_parser_new_with_bom_header() {
+        let parser = CsvParser::new("\u{feff}loss,step,lr").expect("parser should be created");
+        let result = parser
+            .parse_line("0.4,20,0.001")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.expect("metrics should exist");
+        assert_eq!(metrics.loss, Some(0.4));
+        assert_eq!(metrics.step, Some(20));
     }
 }

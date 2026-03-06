@@ -20,6 +20,22 @@ impl RegexParser {
 
 impl LogParser for RegexParser {
     fn parse_line(&self, line: &str) -> Result<Option<TrainingMetrics>> {
+        fn parse_finite_f64(value: &str) -> Option<f64> {
+            value.parse::<f64>().ok().filter(|n| n.is_finite())
+        }
+
+        fn parse_u64_like(value: &str) -> Option<u64> {
+            value.parse::<u64>().ok().or_else(|| {
+                value.parse::<f64>().ok().and_then(|n| {
+                    if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64 {
+                        Some(n as u64)
+                    } else {
+                        None
+                    }
+                })
+            })
+        }
+
         let captures = match self.pattern.captures(line) {
             Some(caps) => caps,
             None => return Ok(None),
@@ -33,70 +49,70 @@ impl LogParser for RegexParser {
         let mut has_any_field = false;
 
         if let Some(loss_match) = captures.name("loss") {
-            if let Ok(val) = loss_match.as_str().parse::<f64>() {
+            if let Some(val) = parse_finite_f64(loss_match.as_str()) {
                 metrics.loss = Some(val);
                 has_any_field = true;
             }
         }
 
         if let Some(lr_match) = captures.name("lr") {
-            if let Ok(val) = lr_match.as_str().parse::<f64>() {
+            if let Some(val) = parse_finite_f64(lr_match.as_str()) {
                 metrics.learning_rate = Some(val);
                 has_any_field = true;
             }
         }
 
         if let Some(step_match) = captures.name("step") {
-            if let Ok(val) = step_match.as_str().parse::<u64>() {
+            if let Some(val) = parse_u64_like(step_match.as_str()) {
                 metrics.step = Some(val);
                 has_any_field = true;
             }
         }
 
         if let Some(throughput_match) = captures.name("throughput") {
-            if let Ok(val) = throughput_match.as_str().parse::<f64>() {
+            if let Some(val) = parse_finite_f64(throughput_match.as_str()) {
                 metrics.throughput = Some(val);
                 has_any_field = true;
             }
         }
 
         if let Some(eval_loss_match) = captures.name("eval_loss")
-            && let Ok(val) = eval_loss_match.as_str().parse::<f64>()
+            && let Some(val) = parse_finite_f64(eval_loss_match.as_str())
         {
             metrics.eval_loss = Some(val);
             has_any_field = true;
         }
 
         if let Some(grad_norm_match) = captures.name("grad_norm")
-            && let Ok(val) = grad_norm_match.as_str().parse::<f64>()
+            && let Some(val) = parse_finite_f64(grad_norm_match.as_str())
         {
             metrics.grad_norm = Some(val);
             has_any_field = true;
         }
 
         if let Some(samples_match) = captures.name("samples_per_second")
-            && let Ok(val) = samples_match.as_str().parse::<f64>()
+            && let Some(val) = parse_finite_f64(samples_match.as_str())
         {
             metrics.samples_per_second = Some(val);
             has_any_field = true;
         }
 
         if let Some(steps_match) = captures.name("steps_per_second")
-            && let Ok(val) = steps_match.as_str().parse::<f64>()
+            && let Some(val) = parse_finite_f64(steps_match.as_str())
         {
             metrics.steps_per_second = Some(val);
             has_any_field = true;
         }
 
         if let Some(tokens_ps_match) = captures.name("tokens_per_second")
-            && let Ok(val) = tokens_ps_match.as_str().parse::<f64>()
+            && let Some(val) = parse_finite_f64(tokens_ps_match.as_str())
         {
             metrics.tokens_per_second = Some(val);
             has_any_field = true;
         }
 
         if let Some(tokens_match) = captures.name("tokens") {
-            if let Ok(val) = tokens_match.as_str().parse::<u64>() {
+            if let Some(val) = parse_u64_like(tokens_match.as_str()) {
                 metrics.tokens = Some(val);
                 has_any_field = true;
             }
@@ -204,5 +220,36 @@ mod tests {
         let result = parser.parse_line(line).expect("parse should succeed");
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_regex_parser_ignores_non_finite_numeric_values() {
+        let pattern = r"step=(?P<step>\d+) loss=(?P<loss>\S+) throughput=(?P<throughput>\S+)";
+        let parser = RegexParser::new(pattern).expect("valid pattern");
+
+        let result = parser
+            .parse_line("step=12 loss=NaN throughput=inf")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.unwrap();
+        assert_eq!(metrics.step, Some(12));
+        assert_eq!(metrics.loss, None);
+        assert_eq!(metrics.throughput, None);
+    }
+
+    #[test]
+    fn test_regex_parser_accepts_integral_float_u64_fields() {
+        let pattern = r"step=(?P<step>\S+) tokens=(?P<tokens>\S+)";
+        let parser = RegexParser::new(pattern).expect("valid pattern");
+
+        let result = parser
+            .parse_line("step=10.0 tokens=2048.0")
+            .expect("parse should succeed");
+
+        assert!(result.is_some());
+        let metrics = result.unwrap();
+        assert_eq!(metrics.step, Some(10));
+        assert_eq!(metrics.tokens, Some(2048));
     }
 }
