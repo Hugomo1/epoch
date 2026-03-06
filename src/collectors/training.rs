@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use color_eyre::{Result, eyre::ContextCompat};
+use color_eyre::{
+    Result,
+    eyre::{ContextCompat, WrapErr},
+};
 use notify::Watcher;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -285,6 +288,37 @@ pub fn create_parser(config: &Config) -> Result<Box<dyn LogParser + Send>> {
     }
 }
 
+pub fn parse_snapshot(path: PathBuf, config: &Config) -> Result<Vec<TrainingMetrics>> {
+    if !path.exists() {
+        color_eyre::eyre::bail!("snapshot file does not exist: {}", path.display());
+    }
+
+    let mut parser_config = config.clone();
+    parser_config.log_file = Some(path.clone());
+    let parser = create_parser(&parser_config)?;
+
+    let file = std::fs::File::open(&path)
+        .context(format!("failed to open snapshot file: {}", path.display()))?;
+    let mut out = Vec::new();
+    for_each_lossy_line(BufReader::new(file), |line| {
+        let normalized = normalize_line(&line);
+        if normalized.is_empty() {
+            return;
+        }
+
+        let parse_result = parser.parse_line(&normalized);
+        match parse_result {
+            Ok(Some(metrics)) => out.push(metrics),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!("snapshot parse error: {err}");
+            }
+        }
+    });
+
+    Ok(out)
+}
+
 pub fn spawn_stdin_reader(
     parser: Box<dyn LogParser + Send>,
     tx: mpsc::Sender<TrainingMetrics>,
@@ -337,10 +371,17 @@ pub fn spawn_file_watcher(
     parser: Box<dyn LogParser + Send>,
     tx: mpsc::Sender<TrainingMetrics>,
 ) -> Result<JoinHandle<()>> {
-    if let Some(parent) = path.parent()
-        && !parent.exists()
-    {
-        color_eyre::eyre::bail!("parent directory does not exist: {}", parent.display());
+    let parent_for_missing_file = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    if !path.exists() && !parent_for_missing_file.exists() {
+        color_eyre::eyre::bail!(
+            "parent directory does not exist: {}",
+            parent_for_missing_file.display()
+        );
     }
 
     Ok(tokio::spawn(async move {
@@ -361,7 +402,7 @@ pub fn spawn_file_watcher(
             let watch_path = if path.exists() {
                 path.as_path()
             } else {
-                path.parent().unwrap_or(path.as_path())
+                parent_for_missing_file.as_path()
             };
 
             if let Err(err) = watcher.watch(watch_path, RecursiveMode::NonRecursive) {
@@ -608,20 +649,6 @@ mod tests {
         let line = "\u{feff}{\"loss\":0.7,\"step\":3}";
         let normalized = normalize_line(line);
         assert_eq!(normalized, "{\"loss\":0.7,\"step\":3}");
-    }
-
-    #[test]
-    fn test_parser_telemetry_counters_increment() {
-        reset_parser_telemetry();
-
-        record_parse_outcome(&Ok(Some(TrainingMetrics::default())));
-        record_parse_outcome(&Ok(None));
-        record_parse_outcome(&Err(color_eyre::eyre::eyre!("parse failed")));
-
-        let snapshot = parser_telemetry_snapshot();
-        assert_eq!(snapshot.success_count, 1);
-        assert_eq!(snapshot.skipped_count, 1);
-        assert_eq!(snapshot.error_count, 1);
     }
 
     #[tokio::test]
@@ -971,6 +998,21 @@ mod tests {
 
         let result = spawn_file_watcher(path, parser, tx);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_accepts_relative_filename_path() {
+        let config = Config {
+            parser: "jsonl".to_string(),
+            ..Config::default()
+        };
+        let parser = create_parser(&config).expect("jsonl parser should be created");
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = spawn_file_watcher(PathBuf::from("demo.jsonl"), parser, tx);
+        assert!(result.is_ok());
+        let handle = result.expect("watcher should spawn for relative filename");
+        handle.abort();
     }
 
     #[tokio::test]

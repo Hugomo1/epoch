@@ -1,5 +1,5 @@
 use epoch::app::App;
-use epoch::collectors::training::create_parser;
+use epoch::collectors::training::{create_parser, parse_snapshot};
 use epoch::config::Config;
 use epoch::event::Event;
 use epoch::types::{GpuMetrics, SystemMetrics, TrainingMetrics};
@@ -38,7 +38,7 @@ async fn test_app_processes_events_from_channels() {
     if let Some(event) = rx.recv().await {
         app.handle_event(event);
     }
-    assert_eq!(app.ui_state.selected_tab, Tab::Metrics);
+    assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn test_training_metrics_flow_through_channel() {
 fn test_app_new_running() {
     let app = App::new(Config::default());
     assert!(app.running);
-    assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+    assert_eq!(app.ui_state.selected_tab, Tab::Main);
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn test_all_public_modules_accessible() {
     let _tm = TrainingMetrics::default();
     let _sm = SystemMetrics::default();
     let _gm = GpuMetrics::default();
-    let _tab = Tab::Dashboard;
+    let _tab = Tab::Main;
     let _parser = create_parser(&Config::default()).expect("default parser should be creatable");
 }
 
@@ -235,7 +235,7 @@ fn test_tab_cycling_many_times() {
         app.handle_key(tab_key);
     }
 
-    assert_eq!(app.ui_state.selected_tab, Tab::Dashboard);
+    assert_eq!(app.ui_state.selected_tab, Tab::Main);
 }
 
 #[test]
@@ -265,6 +265,54 @@ fn test_auto_parser_smoke_with_noise_then_csv_header() {
     let metrics = parsed.expect("metrics should exist");
     assert_eq!(metrics.loss, Some(0.6));
     assert_eq!(metrics.step, Some(12));
+
+    fs::remove_file(&file_path).expect("test file should be removed");
+    fs::remove_dir_all(&root).expect("temp directory should be removed");
+}
+
+#[test]
+fn test_min_zoom_default_contract_smoke() {
+    let app = App::new(Config::default());
+    assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+    assert!(app.ui_state.training_viewport.follow_latest);
+    assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+}
+
+#[test]
+fn test_alerts_start_disabled_without_rules_smoke() {
+    let app = App::new(Config::default());
+    assert!(app.config.alert_rules.is_empty());
+    assert!(app.alerts.active.is_empty());
+}
+
+#[test]
+fn test_run_comparison_snapshot_path_smoke() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("epoch-smoke-run-compare-{unique}"));
+    fs::create_dir_all(&root).expect("temp directory should be created");
+    let file_path = root.join("baseline.log");
+    fs::write(
+        &file_path,
+        "{\"step\":1,\"loss\":1.2,\"learning_rate\":0.001}\n{\"step\":2,\"loss\":1.1,\"learning_rate\":0.001}\n",
+    )
+    .expect("baseline log should be written");
+
+    let config = Config {
+        parser: "auto".to_string(),
+        run_comparison_file: Some(file_path.clone()),
+        ..Config::default()
+    };
+
+    let mut app = App::new(config.clone());
+    let baseline = parse_snapshot(file_path.clone(), &config).expect("snapshot should parse");
+    app.set_run_comparison_snapshot(baseline);
+
+    assert!(app.run_comparison_snapshot_mode());
+    assert!(!app.run_comparison.baseline_step_history.is_empty());
+    assert!(!app.run_comparison.baseline_step_loss_map.is_empty());
 
     fs::remove_file(&file_path).expect("test file should be removed");
     fs::remove_dir_all(&root).expect("temp directory should be removed");

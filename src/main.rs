@@ -12,6 +12,10 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
+use epoch::home::service::{empty_snapshot, load_or_build_cached_snapshot, snapshot_cache_path};
+use epoch::store::repository::{RunStore, global_store_path, source_fingerprint};
+use epoch::store::types::{RunMetadata, RunSourceKind, RunStatus};
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -40,7 +44,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let project_root = std::env::current_dir().ok();
+    let project_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| epoch::project_resolution::resolve_project_identity(&cwd, &[], &[], &[]));
     let mut config = epoch::config::Config::load_effective(project_root.as_deref())?;
     config.merge_cli_args(cli.log_file, cli.stdin, cli.parser);
 
@@ -51,6 +57,15 @@ async fn main() -> Result<()> {
     let run_result: Result<()> = async {
         let mut app = epoch::app::App::new(config.clone());
 
+        if !config.stdin_mode
+            && config.log_file.is_none()
+            && let Some(cache_path) = snapshot_cache_path()
+        {
+            let _snapshot = load_or_build_cached_snapshot(&cache_path, || {
+                empty_snapshot(epoch::store::types::now_epoch_secs())
+            });
+        }
+
         if !config.stdin_mode && config.log_file.is_none() {
             app.ui_state.mode = epoch::app::AppMode::Scanning;
         }
@@ -58,6 +73,7 @@ async fn main() -> Result<()> {
         let (event_tx, mut event_rx) = mpsc::channel(epoch::event::EVENT_CHANNEL_CAPACITY);
         let (metrics_tx, mut metrics_rx) = mpsc::channel(epoch::event::METRICS_CHANNEL_CAPACITY);
         let (system_tx, mut system_rx) = mpsc::channel(epoch::event::SYSTEM_CHANNEL_CAPACITY);
+        let (process_tx, mut process_rx) = mpsc::channel(8);
 
         let _event_handle = epoch::event::spawn_event_reader(event_tx.clone());
         let _tick_handle =
@@ -78,23 +94,115 @@ async fn main() -> Result<()> {
             }
         }
 
+        let run_store = global_store_path().and_then(|path| RunStore::open(&path).ok());
+        let mut active_run_id: Option<String> = None;
+
+        if config.stdin_mode {
+            if let Some(store) = run_store.as_ref() {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|path| path.to_string_lossy().to_string());
+                let project_root = project_root
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string());
+                let attach = store.attach_or_create_active_run(
+                    &source_fingerprint(RunSourceKind::Stdin, Some("stdin"), project_root.as_deref()),
+                    RunSourceKind::Stdin,
+                    RunMetadata {
+                        display_name: Some("stdin session".to_string()),
+                        project_root,
+                        command: None,
+                        cwd,
+                        git_commit: None,
+                        git_dirty: None,
+                        source_locator: Some("stdin".to_string()),
+                    },
+                );
+                if let Ok(result) = attach {
+                    active_run_id = Some(result.run_id);
+                }
+            }
+        } else if let Some(path) = config.log_file.as_ref()
+            && let Some(store) = run_store.as_ref()
+        {
+            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let source_locator = canonical.to_string_lossy().to_string();
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|cwd_path| cwd_path.to_string_lossy().to_string());
+            let project_root_text = project_root
+                .as_ref()
+                .map(|project_path| project_path.to_string_lossy().to_string());
+            let display_name = canonical
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string());
+
+            let attach = store.attach_or_create_active_run(
+                &source_fingerprint(
+                    RunSourceKind::LogFile,
+                    Some(&source_locator),
+                    project_root_text.as_deref(),
+                ),
+                RunSourceKind::LogFile,
+                RunMetadata {
+                    display_name,
+                    project_root: project_root_text,
+                    command: None,
+                    cwd,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some(source_locator),
+                },
+            );
+            if let Ok(result) = attach {
+                active_run_id = Some(result.run_id);
+            }
+        }
+
         if !app.running {
+            if let (Some(store), Some(run_id)) = (run_store.as_ref(), active_run_id.as_deref()) {
+                let _ = store.complete_run(run_id, RunStatus::Completed);
+            }
             return Ok(());
+        }
+
+        if let Some(path) = config.run_comparison_file.clone() {
+            let baseline = epoch::collectors::training::parse_snapshot(path.clone(), &config)
+                .with_context(|| {
+                    format!("failed to parse comparison snapshot: {}", path.display())
+                })?;
+            app.set_run_comparison_snapshot(baseline);
         }
 
         let _training_handle = spawn_training_source(metrics_tx, &config)?;
         let _system_handle =
             spawn_system_collector(system_tx, Duration::from_millis(config.tick_rate_ms));
+        let _process_handle = spawn_process_collector(
+            process_tx,
+            Duration::from_millis(config.tick_rate_ms.saturating_mul(4)),
+        );
 
         while app.running {
             terminal.draw(|frame| epoch::ui::render(frame, &app))?;
 
             tokio::select! {
                 Some(event) = event_rx.recv() => app.handle_event(event),
-                Some(metrics) = metrics_rx.recv() => app.push_metrics(metrics),
+                Some(metrics) = metrics_rx.recv() => {
+                    let step = metrics.step;
+                    app.push_metrics(metrics);
+                    if let (Some(store), Some(run_id), Some(step)) = (run_store.as_ref(), active_run_id.as_deref(), step) {
+                        let _ = store.update_last_step(run_id, step);
+                    }
+                },
                 Some(system) = system_rx.recv() => app.push_system(system),
+                Some(processes) = process_rx.recv() => app.discovered_processes = processes,
                 _ = tokio::signal::ctrl_c() => app.running = false,
             }
+        }
+
+        if let (Some(store), Some(run_id)) = (run_store.as_ref(), active_run_id.as_deref()) {
+            let _ = store.complete_run(run_id, RunStatus::Completed);
         }
 
         Ok(())
@@ -288,6 +396,29 @@ fn spawn_system_collector(
             };
 
             if tx.send(metrics).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn spawn_process_collector(
+    tx: mpsc::Sender<Vec<epoch::collectors::process::ProcessCandidate>>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+
+        loop {
+            ticker.tick().await;
+
+            let discovered = tokio::task::spawn_blocking(
+                epoch::collectors::process::discover_training_like_processes,
+            )
+            .await
+            .unwrap_or_default();
+
+            if tx.send(discovered).await.is_err() {
                 break;
             }
         }
