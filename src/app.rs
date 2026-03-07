@@ -12,7 +12,6 @@ use crate::config::{AlertEvalMode, AlertRuleConfig, AlertRuleKind, Config};
 use crate::discovery::DiscoveredFile;
 use crate::event::Event;
 use crate::types::{SystemMetrics, TrainingMetrics};
-use crate::ui::Tab;
 
 #[derive(Debug)]
 pub struct TrainingState {
@@ -80,12 +79,12 @@ pub struct SystemState {
 
 #[derive(Debug)]
 pub struct UiState {
-    pub selected_tab: Tab,
     pub primary_view: PrimaryView,
+    pub focused_box: u8,
     pub mode: AppMode,
     pub selected_file: Option<PathBuf>,
     pub scanning_frame: usize,
-    pub training_viewport: ViewportState,
+    pub graph_viewports: [ViewportState; 4],
     pub system_viewport: ViewportState,
 }
 
@@ -99,6 +98,8 @@ pub enum PrimaryView {
 }
 
 impl PrimaryView {
+    pub const COUNT: usize = 5;
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
@@ -106,6 +107,27 @@ impl PrimaryView {
             Self::RunExplorer => "Run Explorer",
             Self::EventsNotes => "Events/Notes",
             Self::SystemProcesses => "System/Processes",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Home => 0,
+            Self::LiveRun => 1,
+            Self::RunExplorer => 2,
+            Self::EventsNotes => 3,
+            Self::SystemProcesses => 4,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::Home,
+            1 => Self::LiveRun,
+            2 => Self::RunExplorer,
+            3 => Self::EventsNotes,
+            4 => Self::SystemProcesses,
+            _ => Self::Home,
         }
     }
 }
@@ -401,23 +423,22 @@ impl HelpState {
 fn keymap_entries(profile: &str) -> Vec<(String, String)> {
     let mut entries = vec![
         ("q / Ctrl+C".to_string(), "Quit".to_string()),
-        ("Tab / Shift+Tab".to_string(), "Switch tab".to_string()),
-        ("1/2 (3/4 legacy)".to_string(), "Jump to tab".to_string()),
-        ("5".to_string(), "Go to Home".to_string()),
-        ("6".to_string(), "Go to Live Run".to_string()),
-        ("7".to_string(), "Go to Run Explorer".to_string()),
-        ("8".to_string(), "Go to Events/Notes".to_string()),
-        ("9".to_string(), "Go to System/Processes".to_string()),
+        ("Tab / Shift+Tab".to_string(), "Switch view".to_string()),
+        ("1-4".to_string(), "Focus graph".to_string()),
         ("Space".to_string(), "Toggle live/pause".to_string()),
-        ("Left/Right".to_string(), "Pan history".to_string()),
-        ("- / =".to_string(), "Zoom out/in".to_string()),
-        ("g".to_string(), "Reset viewport to live".to_string()),
+        (
+            "Left/Right".to_string(),
+            "Pan active graph history".to_string(),
+        ),
+        ("- / =".to_string(), "Zoom active graph".to_string()),
+        ("g".to_string(), "Reset all viewports to live".to_string()),
         ("s".to_string(), "Open settings".to_string()),
         ("?".to_string(), "Toggle help overlay".to_string()),
     ];
 
     if profile == "vim" {
-        entries.push(("h/j/k/l".to_string(), "Navigate (vim profile)".to_string()));
+        entries.push(("j/k".to_string(), "Switch view (vim)".to_string()));
+        entries.push(("h/l".to_string(), "Pan history (vim)".to_string()));
         entries.push((
             "Picker (vim): i".to_string(),
             "Enter insert mode for query".to_string(),
@@ -546,12 +567,12 @@ impl App {
             },
             discovered_processes: Vec::new(),
             ui_state: UiState {
-                selected_tab: Tab::Main,
                 primary_view: PrimaryView::LiveRun,
+                focused_box: 1,
                 mode: AppMode::Monitoring,
                 selected_file: None,
                 scanning_frame: 0,
-                training_viewport: ViewportState::default(),
+                graph_viewports: [ViewportState::default(); 4],
                 system_viewport: ViewportState::default(),
             },
             alerts: AlertsState::default(),
@@ -794,172 +815,98 @@ impl App {
                 self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
             }
             (KeyCode::Char('j'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
+                let next = (self.ui_state.primary_view.index() + 1) % PrimaryView::COUNT;
+                self.ui_state.primary_view = PrimaryView::from_index(next);
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
+                let current = self.ui_state.primary_view.index();
+                let next = if current == 0 {
+                    PrimaryView::COUNT - 1
+                } else {
+                    current - 1
+                };
+                self.ui_state.primary_view = PrimaryView::from_index(next);
             }
             (KeyCode::Char('h'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                if !self.ui_state.training_viewport.follow_latest
-                    && self.ui_state.training_viewport.zoom_level > 0
-                {
-                    self.ui_state.training_viewport.offset_samples = self
-                        .ui_state
-                        .training_viewport
-                        .offset_samples
-                        .saturating_add(Self::VIEWPORT_PAN_STEP);
-                }
-                if !self.ui_state.system_viewport.follow_latest
-                    && self.ui_state.system_viewport.zoom_level > 0
-                {
-                    self.ui_state.system_viewport.offset_samples = self
-                        .ui_state
-                        .system_viewport
-                        .offset_samples
-                        .saturating_add(Self::VIEWPORT_PAN_STEP);
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_add(Self::VIEWPORT_PAN_STEP);
                 }
             }
             (KeyCode::Char('l'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                if !self.ui_state.training_viewport.follow_latest
-                    && self.ui_state.training_viewport.zoom_level > 0
-                {
-                    self.ui_state.training_viewport.offset_samples = self
-                        .ui_state
-                        .training_viewport
-                        .offset_samples
-                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
-                }
-                if !self.ui_state.system_viewport.follow_latest
-                    && self.ui_state.system_viewport.zoom_level > 0
-                {
-                    self.ui_state.system_viewport.offset_samples = self
-                        .ui_state
-                        .system_viewport
-                        .offset_samples
-                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_sub(Self::VIEWPORT_PAN_STEP);
                 }
             }
             (KeyCode::Tab, _) => {
-                let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
+                let next = (self.ui_state.primary_view.index() + 1) % PrimaryView::COUNT;
+                self.ui_state.primary_view = PrimaryView::from_index(next);
             }
             (KeyCode::BackTab, _) => {
-                let current = self.ui_state.selected_tab as usize;
-                self.ui_state.selected_tab = Tab::from_repr((current + 1) % 2).unwrap_or(Tab::Main);
+                let current = self.ui_state.primary_view.index();
+                let next = if current == 0 {
+                    PrimaryView::COUNT - 1
+                } else {
+                    current - 1
+                };
+                self.ui_state.primary_view = PrimaryView::from_index(next);
             }
-            (KeyCode::Char('1'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Main;
-                self.ui_state.primary_view = PrimaryView::LiveRun;
-            }
-            (KeyCode::Char('2'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Diagnostics;
-                self.ui_state.primary_view = PrimaryView::LiveRun;
-            }
-            (KeyCode::Char('3'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Diagnostics;
-                self.ui_state.primary_view = PrimaryView::LiveRun;
-            }
-            (KeyCode::Char('4'), KeyModifiers::NONE) => {
-                self.ui_state.selected_tab = Tab::Diagnostics;
-                self.ui_state.primary_view = PrimaryView::LiveRun;
-            }
-            (KeyCode::Char('5'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::Home;
-            }
-            (KeyCode::Char('6'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::LiveRun;
-            }
-            (KeyCode::Char('7'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::RunExplorer;
-            }
-            (KeyCode::Char('8'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::EventsNotes;
-            }
-            (KeyCode::Char('9'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::SystemProcesses;
+            (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
+                let idx = c as u8 - b'0';
+                self.ui_state.focused_box = idx;
             }
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
-                let follow_latest = !self.ui_state.training_viewport.follow_latest;
-                self.ui_state.training_viewport.follow_latest = follow_latest;
+                let follow_latest = !self.ui_state.graph_viewports[0].follow_latest;
+                for vp in &mut self.ui_state.graph_viewports {
+                    vp.follow_latest = follow_latest;
+                    if follow_latest {
+                        vp.offset_samples = 0;
+                    }
+                }
                 self.ui_state.system_viewport.follow_latest = follow_latest;
                 if follow_latest {
-                    self.ui_state.training_viewport.offset_samples = 0;
                     self.ui_state.system_viewport.offset_samples = 0;
                 }
             }
             (KeyCode::Left, KeyModifiers::NONE) => {
-                if !self.ui_state.training_viewport.follow_latest
-                    && self.ui_state.training_viewport.zoom_level > 0
-                {
-                    self.ui_state.training_viewport.offset_samples = self
-                        .ui_state
-                        .training_viewport
-                        .offset_samples
-                        .saturating_add(Self::VIEWPORT_PAN_STEP);
-                }
-                if !self.ui_state.system_viewport.follow_latest
-                    && self.ui_state.system_viewport.zoom_level > 0
-                {
-                    self.ui_state.system_viewport.offset_samples = self
-                        .ui_state
-                        .system_viewport
-                        .offset_samples
-                        .saturating_add(Self::VIEWPORT_PAN_STEP);
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_add(Self::VIEWPORT_PAN_STEP);
                 }
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
-                if !self.ui_state.training_viewport.follow_latest
-                    && self.ui_state.training_viewport.zoom_level > 0
-                {
-                    self.ui_state.training_viewport.offset_samples = self
-                        .ui_state
-                        .training_viewport
-                        .offset_samples
-                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
-                }
-                if !self.ui_state.system_viewport.follow_latest
-                    && self.ui_state.system_viewport.zoom_level > 0
-                {
-                    self.ui_state.system_viewport.offset_samples = self
-                        .ui_state
-                        .system_viewport
-                        .offset_samples
-                        .saturating_sub(Self::VIEWPORT_PAN_STEP);
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_sub(Self::VIEWPORT_PAN_STEP);
                 }
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                self.ui_state.training_viewport.follow_latest = true;
+                for vp in &mut self.ui_state.graph_viewports {
+                    vp.follow_latest = true;
+                    vp.offset_samples = 0;
+                    vp.zoom_level = 0;
+                }
                 self.ui_state.system_viewport.follow_latest = true;
-                self.ui_state.training_viewport.offset_samples = 0;
                 self.ui_state.system_viewport.offset_samples = 0;
-                self.ui_state.training_viewport.zoom_level = 0;
                 self.ui_state.system_viewport.zoom_level = 0;
             }
             (KeyCode::Char('-'), KeyModifiers::NONE) => {
-                self.ui_state.training_viewport.zoom_level =
-                    self.ui_state.training_viewport.zoom_level.saturating_sub(1);
-                self.ui_state.system_viewport.zoom_level =
-                    self.ui_state.system_viewport.zoom_level.saturating_sub(1);
-
-                if self.ui_state.training_viewport.zoom_level == 0 {
-                    self.ui_state.training_viewport.offset_samples = 0;
-                }
-                if self.ui_state.system_viewport.zoom_level == 0 {
-                    self.ui_state.system_viewport.offset_samples = 0;
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                vp.zoom_level = vp.zoom_level.saturating_sub(1);
+                if vp.zoom_level == 0 {
+                    vp.offset_samples = 0;
                 }
             }
             (KeyCode::Char('='), KeyModifiers::NONE) => {
-                self.ui_state.training_viewport.zoom_level = self
-                    .ui_state
-                    .training_viewport
-                    .zoom_level
-                    .saturating_add(1)
-                    .min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
-                self.ui_state.system_viewport.zoom_level = self
-                    .ui_state
-                    .system_viewport
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                vp.zoom_level = vp
                     .zoom_level
                     .saturating_add(1)
                     .min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
@@ -998,8 +945,19 @@ impl App {
         }
     }
 
-    pub fn training_viewport_series(&self, history: &VecDeque<u64>, width: usize) -> Vec<u64> {
-        Self::viewport_series(history, self.ui_state.training_viewport, width)
+    pub fn graph_viewport_series(
+        &self,
+        graph_index: usize,
+        history: &VecDeque<u64>,
+        width: usize,
+    ) -> Vec<u64> {
+        let viewport = self
+            .ui_state
+            .graph_viewports
+            .get(graph_index)
+            .copied()
+            .unwrap_or_default();
+        Self::viewport_series(history, viewport, width)
     }
 
     pub fn system_viewport_series(&self, history: &VecDeque<u64>, width: usize) -> Vec<u64> {
@@ -1820,14 +1778,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::FileFormat;
+    use crate::types::GpuMetrics;
     use std::fs;
     use std::path::PathBuf;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
-    use strum::IntoEnumIterator;
-
-    use crate::discovery::FileFormat;
-    use crate::types::GpuMetrics;
 
     fn sample_discovered_files() -> Vec<DiscoveredFile> {
         vec![
@@ -1863,13 +1819,14 @@ mod tests {
         assert_eq!(app.training.nan_inf_count, 0);
         assert!(app.training.last_loss_spike_at.is_none());
         assert!(app.training.last_nan_inf_at.is_none());
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.focused_box, 1);
         assert_eq!(app.ui_state.mode, AppMode::Monitoring);
         assert!(app.ui_state.selected_file.is_none());
         assert_eq!(app.ui_state.scanning_frame, 0);
-        assert!(app.ui_state.training_viewport.follow_latest);
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
-        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert!(app.ui_state.graph_viewports[0].follow_latest);
+        assert_eq!(app.ui_state.graph_viewports[0].offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[0].zoom_level, 0);
         assert!(app.ui_state.system_viewport.follow_latest);
         assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
         assert_eq!(app.ui_state.system_viewport.zoom_level, 0);
@@ -2019,12 +1976,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_key_in_monitoring_mode_still_works() {
+    fn test_tab_key_cycles_primary_view() {
         let mut app = App::new(Config::default());
         app.ui_state.mode = AppMode::Monitoring;
+        app.ui_state.primary_view = PrimaryView::LiveRun;
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
     }
 
     #[test]
@@ -2190,25 +2148,24 @@ mod tests {
             ..Config::default()
         });
 
-        app.ui_state.training_viewport.follow_latest = false;
-        app.ui_state.system_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = 1;
-        app.ui_state.system_viewport.zoom_level = 1;
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        app.ui_state.graph_viewports[idx].follow_latest = false;
+        app.ui_state.graph_viewports[idx].zoom_level = 1;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(
-            app.ui_state.training_viewport.offset_samples,
+            app.ui_state.graph_viewports[idx].offset_samples,
             App::VIEWPORT_PAN_STEP
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[idx].offset_samples, 0);
     }
 
     #[test]
@@ -2272,12 +2229,12 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_navigation_isolated_from_global_vim_tab_switching() {
+    fn test_settings_navigation_isolated_from_global_vim_view_switching() {
         let mut app = App::new(Config {
             keymap_profile: "vim".to_string(),
             ..Config::default()
         });
-        app.ui_state.selected_tab = Tab::Main;
+        app.ui_state.primary_view = PrimaryView::LiveRun;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -2288,21 +2245,22 @@ mod tests {
         };
 
         assert_eq!(selected_row, 1);
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
     }
 
     #[test]
     fn test_settings_arrow_keys_do_not_leak_into_global_viewport_controls() {
         let mut app = App::new(Config::default());
-        app.ui_state.training_viewport.follow_latest = false;
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        app.ui_state.graph_viewports[idx].follow_latest = false;
         app.ui_state.system_viewport.follow_latest = false;
-        app.ui_state.training_viewport.offset_samples = 7;
+        app.ui_state.graph_viewports[idx].offset_samples = 7;
         app.ui_state.system_viewport.offset_samples = 9;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 7);
+        assert_eq!(app.ui_state.graph_viewports[idx].offset_samples, 7);
         assert_eq!(app.ui_state.system_viewport.offset_samples, 9);
     }
 
@@ -2488,71 +2446,64 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_cycle_forward() {
+    fn test_tab_cycles_primary_views_forward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 
         let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Main); // wrap
+        assert_eq!(app.ui_state.primary_view, PrimaryView::EventsNotes);
+
+        app.handle_key(tab_key);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses);
+
+        app.handle_key(tab_key);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::Home); // wrap
     }
 
     #[test]
-    fn test_tab_cycle_backward() {
+    fn test_tab_cycles_primary_views_backward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 
         let backtab_key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         app.handle_key(backtab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics); // wrap around
+        assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
+
+        app.handle_key(backtab_key);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses); // wrap
     }
 
     #[test]
-    fn test_tab_direct_number() {
+    fn test_number_keys_focus_boxes() {
         let mut app = App::new(Config::default());
 
-        let key1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
-        app.handle_key(key1);
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.focused_box, 1);
 
-        let key2 = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
-        app.handle_key(key2);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
-
-        let key3 = KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE);
-        app.handle_key(key3);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
-
-        let key4 = KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE);
-        app.handle_key(key4);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
-    }
-
-    #[test]
-    fn test_tab_iteration_count_is_2() {
-        let tabs: Vec<Tab> = Tab::iter().collect();
-        assert_eq!(tabs.len(), 2);
-    }
-
-    #[test]
-    fn test_tab_cycle_forward_wraps_with_diagnostics() {
-        let mut app = App::new(Config::default());
-        let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
-        app.handle_key(tab_key);
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
-    }
-
-    #[test]
-    fn test_direct_tab_jump_4_routes_to_diagnostics() {
-        let mut app = App::new(Config::default());
         app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
+        assert_eq!(app.ui_state.focused_box, 4);
+
+        // Keys 5-9 should not change focus
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.focused_box, 4);
+    }
+
+    #[test]
+    fn test_tab_preserves_focused_box() {
+        let mut app = App::new(Config::default());
+        app.ui_state.focused_box = 3;
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.ui_state.focused_box, 3);
+    }
+
+    #[test]
+    fn test_primary_view_count() {
+        assert_eq!(PrimaryView::COUNT, 5);
     }
 
     #[test]
@@ -2594,7 +2545,7 @@ mod tests {
             });
         }
 
-        let series = app.training_viewport_series(&app.training.step_history, 12);
+        let series = app.graph_viewport_series(0, &app.training.step_history, 12);
         assert_eq!(series.len(), 12);
         assert_eq!(series.last().copied(), Some(99));
 
@@ -2603,7 +2554,7 @@ mod tests {
             ..TrainingMetrics::default()
         });
 
-        let updated = app.training_viewport_series(&app.training.step_history, 12);
+        let updated = app.graph_viewport_series(0, &app.training.step_history, 12);
         assert_eq!(updated.last().copied(), Some(100));
     }
 
@@ -2619,10 +2570,11 @@ mod tests {
         }
 
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        app.ui_state.training_viewport.zoom_level = 1;
-        app.ui_state.training_viewport.offset_samples = usize::MAX;
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        app.ui_state.graph_viewports[idx].zoom_level = 1;
+        app.ui_state.graph_viewports[idx].offset_samples = usize::MAX;
 
-        let series = app.training_viewport_series(&app.training.step_history, 10);
+        let series = app.graph_viewport_series(0, &app.training.step_history, 10);
         assert_eq!(series.len(), 10);
         assert_eq!(series.first().copied(), Some(0));
         assert_eq!(series.last().copied(), Some(24));
@@ -2639,7 +2591,8 @@ mod tests {
             });
         }
 
-        let baseline = app.training_viewport_series(&app.training.step_history, 16);
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        let baseline = app.graph_viewport_series(idx, &app.training.step_history, 16);
         assert_eq!(baseline.len(), 16);
         assert_eq!(baseline.first().copied(), Some(0));
         assert_eq!(baseline.last().copied(), Some(255));
@@ -2647,9 +2600,9 @@ mod tests {
         for _ in 0..20 {
             app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
         }
-        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert_eq!(app.ui_state.graph_viewports[idx].zoom_level, 0);
 
-        let zoomed_out = app.training_viewport_series(&app.training.step_history, 16);
+        let zoomed_out = app.graph_viewport_series(idx, &app.training.step_history, 16);
         assert_eq!(zoomed_out.len(), 16);
         assert_eq!(zoomed_out, baseline);
 
@@ -2657,11 +2610,11 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE));
         }
         assert_eq!(
-            app.ui_state.training_viewport.zoom_level,
+            app.ui_state.graph_viewports[idx].zoom_level,
             App::VIEWPORT_MAX_ZOOM_LEVEL
         );
 
-        let zoomed_in = app.training_viewport_series(&app.training.step_history, 16);
+        let zoomed_in = app.graph_viewport_series(idx, &app.training.step_history, 16);
         assert_eq!(zoomed_in.len(), 16);
         assert_ne!(zoomed_in.first(), baseline.first());
         assert_eq!(zoomed_in.last().copied(), Some(255));
@@ -2768,9 +2721,9 @@ mod tests {
     fn test_startup_autofit_sets_follow_latest_and_zero_offset() {
         let app = App::new(Config::default());
 
-        assert!(app.ui_state.training_viewport.follow_latest);
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
-        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert!(app.ui_state.graph_viewports[0].follow_latest);
+        assert_eq!(app.ui_state.graph_viewports[0].offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[0].zoom_level, 0);
         assert!(app.ui_state.system_viewport.follow_latest);
         assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
         assert_eq!(app.ui_state.system_viewport.zoom_level, 0);
@@ -2786,7 +2739,7 @@ mod tests {
             });
         }
 
-        let series = app.training_viewport_series(&app.training.step_history, 10);
+        let series = app.graph_viewport_series(0, &app.training.step_history, 10);
         assert_eq!(series.len(), 10);
         assert_eq!(series.first().copied(), Some(0));
         assert_eq!(series.last().copied(), Some(99));
@@ -2795,16 +2748,14 @@ mod tests {
     #[test]
     fn test_min_zoom_autofit_disables_pan() {
         let mut app = App::new(Config::default());
-        app.ui_state.training_viewport.follow_latest = false;
-        app.ui_state.system_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = 0;
-        app.ui_state.system_viewport.zoom_level = 0;
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        app.ui_state.graph_viewports[idx].follow_latest = false;
+        app.ui_state.graph_viewports[idx].zoom_level = 0;
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
-        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[idx].offset_samples, 0);
     }
 
     #[test]
@@ -2813,16 +2764,14 @@ mod tests {
             keymap_profile: "vim".to_string(),
             ..Config::default()
         });
-        app.ui_state.training_viewport.follow_latest = false;
-        app.ui_state.system_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = 0;
-        app.ui_state.system_viewport.zoom_level = 0;
+        let idx = (app.ui_state.focused_box - 1) as usize;
+        app.ui_state.graph_viewports[idx].follow_latest = false;
+        app.ui_state.graph_viewports[idx].zoom_level = 0;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
 
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
-        assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[idx].offset_samples, 0);
     }
 
     #[test]
@@ -2835,22 +2784,22 @@ mod tests {
             });
         }
 
-        let wide = app.training_viewport_series(&app.training.step_history, 20);
-        let narrow = app.training_viewport_series(&app.training.step_history, 8);
+        let wide = app.graph_viewport_series(0, &app.training.step_history, 20);
+        let narrow = app.graph_viewport_series(0, &app.training.step_history, 8);
 
         assert_eq!(wide.first().copied(), Some(0));
         assert_eq!(wide.last().copied(), Some(79));
         assert_eq!(narrow.first().copied(), Some(0));
         assert_eq!(narrow.last().copied(), Some(79));
 
-        app.ui_state.training_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = 1;
-        app.ui_state.training_viewport.offset_samples = 15;
-        let before = app.ui_state.training_viewport.offset_samples;
-        let _ = app.training_viewport_series(&app.training.step_history, 12);
-        let _ = app.training_viewport_series(&app.training.step_history, 6);
+        app.ui_state.graph_viewports[0].follow_latest = false;
+        app.ui_state.graph_viewports[0].zoom_level = 1;
+        app.ui_state.graph_viewports[0].offset_samples = 15;
+        let before = app.ui_state.graph_viewports[0].offset_samples;
+        let _ = app.graph_viewport_series(0, &app.training.step_history, 12);
+        let _ = app.graph_viewport_series(0, &app.training.step_history, 6);
 
-        assert_eq!(app.ui_state.training_viewport.offset_samples, before);
+        assert_eq!(app.ui_state.graph_viewports[0].offset_samples, before);
     }
 
     #[test]
@@ -2863,34 +2812,34 @@ mod tests {
             });
         }
 
-        app.ui_state.training_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = 2;
-        app.ui_state.training_viewport.offset_samples = 11;
-        let before = app.ui_state.training_viewport.offset_samples;
+        app.ui_state.graph_viewports[0].follow_latest = false;
+        app.ui_state.graph_viewports[0].zoom_level = 2;
+        app.ui_state.graph_viewports[0].offset_samples = 11;
+        let before = app.ui_state.graph_viewports[0].offset_samples;
 
-        let _ = app.training_viewport_series(&app.training.step_history, 18);
-        let _ = app.training_viewport_series(&app.training.step_history, 7);
+        let _ = app.graph_viewport_series(0, &app.training.step_history, 18);
+        let _ = app.graph_viewport_series(0, &app.training.step_history, 7);
 
-        assert_eq!(app.ui_state.training_viewport.offset_samples, before);
+        assert_eq!(app.ui_state.graph_viewports[0].offset_samples, before);
     }
 
     #[test]
     fn test_reset_g_restores_min_zoom_autofit_contract() {
         let mut app = App::new(Config::default());
-        app.ui_state.training_viewport.follow_latest = false;
+        app.ui_state.graph_viewports[0].follow_latest = false;
         app.ui_state.system_viewport.follow_latest = false;
-        app.ui_state.training_viewport.zoom_level = App::VIEWPORT_MAX_ZOOM_LEVEL;
+        app.ui_state.graph_viewports[0].zoom_level = App::VIEWPORT_MAX_ZOOM_LEVEL;
         app.ui_state.system_viewport.zoom_level = App::VIEWPORT_MAX_ZOOM_LEVEL;
-        app.ui_state.training_viewport.offset_samples = 42;
+        app.ui_state.graph_viewports[0].offset_samples = 42;
         app.ui_state.system_viewport.offset_samples = 42;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
 
-        assert!(app.ui_state.training_viewport.follow_latest);
+        assert!(app.ui_state.graph_viewports[0].follow_latest);
         assert!(app.ui_state.system_viewport.follow_latest);
-        assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+        assert_eq!(app.ui_state.graph_viewports[0].offset_samples, 0);
         assert_eq!(app.ui_state.system_viewport.offset_samples, 0);
-        assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
+        assert_eq!(app.ui_state.graph_viewports[0].zoom_level, 0);
         assert_eq!(app.ui_state.system_viewport.zoom_level, 0);
     }
 
@@ -3428,7 +3377,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(key, desc)| key == "1/2 (3/4 legacy)" && desc == "Jump to tab")
+                .any(|(key, desc)| key == "Tab / Shift+Tab" && desc == "Switch view")
         );
     }
 
@@ -3459,16 +3408,17 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         app.on_tick();
 
-        let _ = app.training_viewport_series(&app.training.loss_history, 8);
+        let _ = app.graph_viewport_series(0, &app.training.loss_history, 8);
         let _ = app.run_compare_alignment_by_step();
-        assert!(app.ui_state.training_viewport.zoom_level == 0);
+        assert!(app.ui_state.graph_viewports[0].zoom_level == 0);
     }
 
     #[test]
     fn test_app_new() {
         let app = App::new(Config::default());
         assert!(app.running);
-        assert_eq!(app.ui_state.selected_tab, Tab::Main);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.focused_box, 1);
         assert!(app.training.latest.is_none());
     }
 }
