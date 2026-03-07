@@ -3,9 +3,9 @@ use epoch::app::{App, PrimaryView};
 use epoch::config::Config;
 use epoch::ui::events_notes;
 use epoch::ui::home;
+use epoch::ui::phase1_primary_views;
 use epoch::ui::run_explorer;
 use epoch::ui::system_processes;
-use epoch::ui::{Tab, phase1_primary_views};
 
 #[test]
 fn navigation_routes_include_phase1_views() {
@@ -18,9 +18,14 @@ fn navigation_routes_include_phase1_views() {
 }
 
 #[test]
-fn legacy_main_diagnostics_survive_as_live_subtabs() {
-    assert_eq!(Tab::from_repr(0), Some(Tab::Main));
-    assert_eq!(Tab::from_repr(1), Some(Tab::Diagnostics));
+fn primary_view_count_matches_phase1_views() {
+    let views = phase1_primary_views();
+    assert_eq!(views.len(), 5);
+    assert!(views.contains(&PrimaryView::Home));
+    assert!(views.contains(&PrimaryView::LiveRun));
+    assert!(views.contains(&PrimaryView::RunExplorer));
+    assert!(views.contains(&PrimaryView::EventsNotes));
+    assert!(views.contains(&PrimaryView::SystemProcesses));
 }
 
 #[test]
@@ -130,19 +135,17 @@ fn system_processes_view_renders_pid_command_cwd_usage() {
 #[test]
 fn key_driven_view_switching_routes_primary_views() {
     let mut app = App::new(Config::default());
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
-    assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::EventsNotes);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses);
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
 }

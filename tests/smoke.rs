@@ -3,7 +3,6 @@ use epoch::collectors::training::{create_parser, parse_snapshot};
 use epoch::config::Config;
 use epoch::event::Event;
 use epoch::types::{GpuMetrics, SystemMetrics, TrainingMetrics};
-use epoch::ui::Tab;
 use tokio::sync::mpsc;
 
 use std::fs;
@@ -38,7 +37,11 @@ async fn test_app_processes_events_from_channels() {
     if let Some(event) = rx.recv().await {
         app.handle_event(event);
     }
-    assert_eq!(app.ui_state.selected_tab, Tab::Diagnostics);
+    assert_eq!(
+        app.ui_state.primary_view,
+        epoch::app::PrimaryView::RunExplorer
+    );
+    assert_eq!(app.ui_state.focused_box, 1);
 }
 
 #[tokio::test]
@@ -69,7 +72,8 @@ async fn test_training_metrics_flow_through_channel() {
 fn test_app_new_running() {
     let app = App::new(Config::default());
     assert!(app.running);
-    assert_eq!(app.ui_state.selected_tab, Tab::Main);
+    assert_eq!(app.ui_state.primary_view, epoch::app::PrimaryView::LiveRun);
+    assert_eq!(app.ui_state.focused_box, 1);
 }
 
 #[test]
@@ -161,7 +165,6 @@ fn test_all_public_modules_accessible() {
     let _tm = TrainingMetrics::default();
     let _sm = SystemMetrics::default();
     let _gm = GpuMetrics::default();
-    let _tab = Tab::Main;
     let _parser = create_parser(&Config::default()).expect("default parser should be creatable");
 }
 
@@ -226,7 +229,7 @@ fn test_history_overflow_no_panic() {
 }
 
 #[test]
-fn test_tab_cycling_many_times() {
+fn test_primary_view_cycling_many_times() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = App::new(Config::default());
@@ -235,7 +238,9 @@ fn test_tab_cycling_many_times() {
         app.handle_key(tab_key);
     }
 
-    assert_eq!(app.ui_state.selected_tab, Tab::Main);
+    // Should cycle through all 5 PrimaryViews and return to LiveRun
+    assert_eq!(app.ui_state.primary_view, epoch::app::PrimaryView::LiveRun);
+    assert_eq!(app.ui_state.focused_box, 1);
 }
 
 #[test]
@@ -273,9 +278,9 @@ fn test_auto_parser_smoke_with_noise_then_csv_header() {
 #[test]
 fn test_min_zoom_default_contract_smoke() {
     let app = App::new(Config::default());
-    assert_eq!(app.ui_state.training_viewport.zoom_level, 0);
-    assert!(app.ui_state.training_viewport.follow_latest);
-    assert_eq!(app.ui_state.training_viewport.offset_samples, 0);
+    assert_eq!(app.ui_state.graph_viewports[0].zoom_level, 0);
+    assert!(app.ui_state.graph_viewports[0].follow_latest);
+    assert_eq!(app.ui_state.graph_viewports[0].offset_samples, 0);
 }
 
 #[test]
