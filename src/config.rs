@@ -760,8 +760,8 @@ history_size = 777
     #[test]
     fn test_readme_documented_release_keys_exist() {
         let readme = std::fs::read_to_string("README.md").expect("README should exist");
-        assert!(readme.contains("1/2 (3/4 legacy)"));
-        assert!(readme.contains("Main / Diagnostics"));
+        assert!(readme.contains("1-4"));
+        assert!(readme.contains("Focus graph"));
         assert!(readme.contains("[[alert_rules]]"));
         assert!(readme.contains("kind = \"throughput_drop\""));
         assert!(readme.contains("run_comparison_file"));

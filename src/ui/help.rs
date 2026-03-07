@@ -138,7 +138,8 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        assert!(content.contains("1/2 (3/4 legacy)"));
+        assert!(content.contains("Tab / Shift+Tab"));
+        assert!(content.contains("1-4"));
         assert!(content.contains("- / ="));
     }
 }
