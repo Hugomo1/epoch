@@ -94,17 +94,17 @@ step,loss,lr
 
 ## Keybindings
 
-| Key                 | Action                                  |
-| ------------------- | --------------------------------------- |
-| `q` / `Ctrl+C`      | Quit                                    |
-| `Tab` / `Shift+Tab` | Switch tabs                             |
-| `1/2 (3/4 legacy)`  | Jump to Main / Diagnostics              |
-| `Space`             | Toggle live/pause                       |
-| `Left/Right`        | Pan history (non-min zoom)              |
-| `- / =`             | Zoom out / in                           |
-| `g`                 | Reset viewport to min-zoom live autofit |
-| `s`                 | Open settings                           |
-| `?`                 | Toggle help overlay                     |
+| Key                 | Action                              |
+| ------------------- | ----------------------------------- |
+| `q` / `Ctrl+C`      | Quit                                |
+| `Tab` / `Shift+Tab` | Switch views                        |
+| `1-4`               | Focus graph (Loss, Eval, LR, Grad)  |
+| `Space`             | Toggle live/pause (all viewports)   |
+| `Left/Right`        | Pan active graph history            |
+| `- / =`             | Zoom active graph out/in            |
+| `g`                 | Reset all viewports to live         |
+| `s`                 | Open settings                       |
+| `?`                 | Toggle help overlay                 |
 
 ## Configuration
 
@@ -157,36 +157,66 @@ accent = "#89b4fa"
 
 ## Roadmap
 
-The long-term goal is not just to watch logs better.
+The long-term goal is not to build a better log viewer. It is to make `epoch` the place you stay during training — an operating environment, not a one-shot dashboard.
 
-It is to make `epoch` feel like a real training environment you can live in.
+Development follows five pillars:
 
-Near term:
+1. **Live observability** — excellent while training is happening
+2. **Habitable environment** — inspect, compare, annotate, and navigate, not just watch
+3. **Standalone and local-first** — no accounts, no cloud, no required web connection
+4. **Anywhere on the machine** — discover projects, runs, and processes from any directory
+5. **Model understanding** — make architecture and training state legible, not just metrics
 
-- run comparison
-- TensorBoard support
-- richer Hugging Face integration
-- distributed training monitoring
-- smoother and more informative metric views
+### Phase 1: Foundations
 
-Longer term:
+- local run store and project resolution
+- active process discovery
+- home view with orientation and entry points
+- live run monitoring
+- run explorer with filtering and search
+- launch-from-anywhere support
+- notes, bookmarks, and event timeline
 
-- project-aware local run memory
-- run discovery from anywhere on the machine
-- artifact browsing
-- model structure / block visualization
-- a better terminal home for training workflows
+### Phase 2: Habitable environment
+
+- run comparison (config diff, curve overlay, metric summary)
+- artifact browser (checkpoints, configs, logs, eval outputs)
+- session memory (remembered runs, comparisons, context)
+- global finder / command palette
+- attach and resume workflows
+- alerting and anomaly surfacing
+
+### Phase 3: Model understanding
+
+- model structure visualization (module hierarchy, block flow)
+- parameter and trainability summaries
+- frozen / trainable / adapter overlays
+- model diff between runs or checkpoints
+
+### Phase 4: Advanced operational insight
+
+- runtime overlays (gradient norms, memory hotspots, latency per block)
+- distributed training awareness (rank status, desync detection)
+- deeper framework adapters (PyTorch Lightning, DeepSpeed, Accelerate)
+- richer eval and sample inspection
+
+### Phase 5: Optional expansions
+
+- exportable summaries and reports
+- optional sync and sharing layer
+- plugin ecosystem
+- TensorBoard event file import
 
 ## Contributing
 
 Contributions are welcome. Start here: [Contributing guide](./CONTRIBUTING.md)
 
-High-leverage areas include:
+High-leverage areas right now:
 
-- parsers and integrations
-- run discovery
+- parsers and framework integrations
+- run discovery and process attach
 - comparison workflows
-- terminal UX
+- terminal UX and interaction design
 - model visualization
 
 ## License
