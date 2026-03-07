@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Sparkline};
+use ratatui::widgets::{Block, Borders, LineGauge, Paragraph};
 
 use crate::app::App;
-use crate::ui::graph::render_line_graph;
+use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -152,41 +152,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let cpu_data = app.system_viewport_series(&app.system.cpu_history, history_width);
     let ram_data = app.system_viewport_series(&app.system.ram_history, history_width);
 
-    if app.config.graph_mode == "line" && !cpu_data.is_empty() {
-        render_line_graph(
-            frame,
-            history_layout[0],
-            Block::default().title("CPU History").borders(Borders::ALL),
-            "cpu",
-            &cpu_data,
-            palette.cpu_color,
-        );
-    } else {
-        let cpu_sparkline = Sparkline::default()
-            .block(Block::default().title("CPU History").borders(Borders::ALL))
-            .data(&cpu_data)
-            .style(Style::default().fg(palette.cpu_color))
-            .max(10000);
-        frame.render_widget(cpu_sparkline, history_layout[0]);
-    }
+    MetricGraph::new("CPU History", &cpu_data, palette.cpu_color)
+        .graph_mode(&app.config.graph_mode)
+        .empty_message("No CPU data")
+        .palette(palette.accent, palette.muted, palette.header_fg)
+        .render(frame, history_layout[0]);
 
-    if app.config.graph_mode == "line" && !ram_data.is_empty() {
-        render_line_graph(
-            frame,
-            history_layout[1],
-            Block::default().title("RAM History").borders(Borders::ALL),
-            "ram",
-            &ram_data,
-            palette.ram_color,
-        );
-    } else {
-        let ram_sparkline = Sparkline::default()
-            .block(Block::default().title("RAM History").borders(Borders::ALL))
-            .data(&ram_data)
-            .style(Style::default().fg(palette.ram_color))
-            .max(10000);
-        frame.render_widget(ram_sparkline, history_layout[1]);
-    }
+    MetricGraph::new("RAM History", &ram_data, palette.ram_color)
+        .graph_mode(&app.config.graph_mode)
+        .empty_message("No RAM data")
+        .palette(palette.accent, palette.muted, palette.header_fg)
+        .render(frame, history_layout[1]);
 }
 
 fn format_bytes(bytes: u64) -> String {

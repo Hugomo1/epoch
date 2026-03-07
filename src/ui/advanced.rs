@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .split(top[0]);
 
     let eval_width = usize::from(graphs[0].width.saturating_sub(2).max(1));
-    let eval_history = app.training_viewport_series(&app.training.eval_loss_history, eval_width);
+    let eval_history = app.graph_viewport_series(1, &app.training.eval_loss_history, eval_width);
     let eval_block = Block::default()
         .title("Eval Loss (source: validation, unit: loss)")
         .borders(Borders::ALL);
@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let grad_width = usize::from(graphs[1].width.saturating_sub(2).max(1));
-    let grad_history = app.training_viewport_series(&app.training.grad_norm_history, grad_width);
+    let grad_history = app.graph_viewport_series(3, &app.training.grad_norm_history, grad_width);
     let grad_block = Block::default()
         .title("Grad Norm (source: optimizer, unit: norm)")
         .borders(Borders::ALL);

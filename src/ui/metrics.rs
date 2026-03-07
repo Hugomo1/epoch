@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let sparkline_width = usize::from(chunks[0].width.saturating_sub(2).max(1));
-    let loss_history = app.training_viewport_series(&app.training.loss_history, sparkline_width);
+    let loss_history = app.graph_viewport_series(0, &app.training.loss_history, sparkline_width);
     let current_loss = latest.loss.unwrap_or(0.0);
     let loss_trend = trend_indicator(&app.training.loss_history);
 
@@ -82,7 +82,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let lr_sparkline_width = usize::from(chunks[1].width.saturating_sub(2).max(1));
-    let lr_history = app.training_viewport_series(&app.training.lr_history, lr_sparkline_width);
+    let lr_history = app.graph_viewport_series(2, &app.training.lr_history, lr_sparkline_width);
     let current_lr = latest.learning_rate.unwrap_or(0.0);
 
     let lr_title = format!("Learning Rate: {}", format_lr_value(current_lr));

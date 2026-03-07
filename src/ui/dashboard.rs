@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, LineGauge, Paragraph, Sparkline};
+use ratatui::widgets::{Block, Borders, LineGauge, Paragraph};
 
 use crate::app::App;
-use crate::ui::graph::render_line_graph;
+use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
 fn format_loss(v: f64) -> String {
@@ -62,25 +62,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     .split(area);
 
     let history_width = usize::from(main_chunks[0].width.saturating_sub(2).max(1));
-    let history_vec = app.training_viewport_series(&app.training.loss_history, history_width);
+    let history_vec = app.graph_viewport_series(0, &app.training.loss_history, history_width);
 
-    let loss_block = Block::default().title("Loss").borders(Borders::ALL);
-    if app.config.graph_mode == "line" && !history_vec.is_empty() {
-        render_line_graph(
-            frame,
-            main_chunks[0],
-            loss_block,
-            "loss",
-            &history_vec,
-            palette.loss_color,
-        );
-    } else {
-        let sparkline = Sparkline::default()
-            .block(loss_block)
-            .data(&history_vec)
-            .style(Style::default().fg(palette.loss_color));
-        frame.render_widget(sparkline, main_chunks[0]);
-    }
+    MetricGraph::new("Loss", &history_vec, palette.loss_color)
+        .graph_mode(&app.config.graph_mode)
+        .empty_message("No loss data")
+        .palette(palette.accent, palette.muted, palette.header_fg)
+        .render(frame, main_chunks[0]);
 
     let Some(latest) = app.training.latest.as_ref() else {
         return;
