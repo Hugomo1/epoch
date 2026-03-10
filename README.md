@@ -7,13 +7,12 @@
 </p>
 
 <p align="center">
-  Monitor live runs, inspect system health, compare experiments, and stay close to training —
+  Monitor live runs, inspect system health and compare experiments —
   all from the terminal or over SSH.
 </p>
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-292929?style=for-the-badge&logo=rust&logoColor=white"/>
-  <img alt="Ratatui" src="https://img.shields.io/badge/Ratatui-292929?style=for-the-badge"/>
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-C0A359?style=for-the-badge"/>
   <img alt="Linux" src="https://img.shields.io/badge/Linux-supported-46B980?style=for-the-badge&logo=linux&logoColor=white"/>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-supported-46B980?style=for-the-badge&logo=apple&logoColor=white"/>
@@ -45,8 +44,6 @@ python train.py 2>&1 | ./target/release/epoch --stdin
 ./target/release/epoch
 ```
 
-When launched without arguments, `epoch` searches the current directory for recent training logs and tries to attach automatically.
-
 ## Why epoch
 
 Training still feels fragmented when you live in logs, tmux, and SSH.
@@ -54,12 +51,6 @@ Training still feels fragmented when you live in logs, tmux, and SSH.
 You tail raw output in one pane, watch GPU stats in another, guess whether loss is healthy, and lose context between runs. Browser-first tools can help, but they often feel far away from the actual training loop.
 
 `epoch` is built to be the place you stay during training: standalone, local-first, fast, SSH-friendly, and useful from anywhere on the machine.
-
-It starts with live observability, but the goal is bigger: a terminal environment for understanding runs, not just watching them.
-
-<p align="center">
-  <img src="docs/flow.svg" alt="epoch flow: logs and training outputs into a live terminal environment" width="860" />
-</p>
 
 ## What it does
 
@@ -94,17 +85,23 @@ step,loss,lr
 
 ## Keybindings
 
-| Key                 | Action                              |
-| ------------------- | ----------------------------------- |
-| `q` / `Ctrl+C`      | Quit                                |
-| `Tab` / `Shift+Tab` | Switch views                        |
-| `1-4`               | Focus graph (Loss, Eval, LR, Grad)  |
-| `Space`             | Toggle live/pause (all viewports)   |
-| `Left/Right`        | Pan active graph history            |
-| `- / =`             | Zoom active graph out/in            |
-| `g`                 | Reset all viewports to live         |
-| `s`                 | Open settings                       |
-| `?`                 | Toggle help overlay                 |
+| Key                 | Action                                                                                    |
+| ------------------- | ----------------------------------------------------------------------------------------- |
+| `q` / `Ctrl+C`      | Quit                                                                                      |
+| `Tab` / `Shift+Tab` | Cycle focused Home panel or Run Detail graph                                              |
+| `1-4`               | Focus Home panel (Overview/Runs/Processes/Alerts) or Run Detail graph (Loss/Eval/LR/Grad) |
+| `Enter`             | Drill into focused run or attach selected process                                         |
+| `/`                 | Search runs (when Runs panel is focused)                                                  |
+| `f`                 | Cycle run status filter (when Runs panel is focused)                                      |
+| `r`                 | Refresh run/process data                                                                  |
+| `Space`             | Toggle live/pause viewport follow (Run Detail)                                            |
+| `Left/Right`        | Pan active graph history (Run Detail)                                                     |
+| `- / =`             | Zoom active graph out/in (Run Detail)                                                     |
+| `g`                 | Reset all viewports to live (Run Detail)                                                  |
+| `s`                 | Open settings                                                                             |
+| `?`                 | Toggle help overlay                                                                       |
+
+With `keymap_profile = "vim"`, motion keys (`h/j/k/l`) are enabled in monitoring surfaces; with the default keymap, arrow keys are used for movement.
 
 ## Configuration
 

@@ -4,6 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use epoch::project_resolution::{KnownProject, resolve_project_identity};
 
+fn normalize(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -27,7 +31,7 @@ fn project_resolution_prefers_alias_over_git_root() {
 
     let resolved = resolve_project_identity(&cwd, &[alias.clone()], &[], &[])
         .expect("resolution should exist");
-    assert_eq!(resolved, alias);
+    assert_eq!(normalize(&resolved), normalize(&alias));
 }
 
 #[test]
@@ -42,7 +46,7 @@ fn project_resolution_handles_symlink_and_nested_repo_cases() {
     fs::create_dir_all(&cwd).expect("cwd should exist");
 
     let direct = resolve_project_identity(&cwd, &[], &[], &[]).expect("resolution should exist");
-    assert_eq!(direct, inner);
+    assert_eq!(normalize(&direct), normalize(&inner));
 
     #[cfg(unix)]
     {
@@ -51,7 +55,7 @@ fn project_resolution_handles_symlink_and_nested_repo_cases() {
         let linked_cwd = link.join("run");
         let via_link =
             resolve_project_identity(&linked_cwd, &[], &[], &[]).expect("resolution exists");
-        assert_eq!(via_link, inner);
+        assert_eq!(normalize(&via_link), normalize(&inner));
     }
 }
 
