@@ -95,6 +95,7 @@ pub struct RunExplorerUiState {
 #[derive(Debug)]
 pub struct UiState {
     pub primary_view: PrimaryView,
+    pub monitoring: MonitoringState,
     pub focused_box: u8,
     pub mode: AppMode,
     pub selected_file: Option<PathBuf>,
@@ -106,22 +107,71 @@ pub struct UiState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitoringRoute {
+    Home,
+    RunDetail,
+}
+
+impl Default for MonitoringRoute {
+    fn default() -> Self {
+        Self::Home
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelFocus {
+    Overview,
+    Runs,
+    Processes,
+    Files,
+}
+
+impl PanelFocus {
+    pub const ORDER: [Self; 4] = [Self::Overview, Self::Runs, Self::Processes, Self::Files];
+
+    fn next(self) -> Self {
+        let idx = Self::ORDER
+            .iter()
+            .position(|focus| *focus == self)
+            .unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
+    }
+
+    fn previous(self) -> Self {
+        let idx = Self::ORDER
+            .iter()
+            .position(|focus| *focus == self)
+            .unwrap_or(0);
+        let next = if idx == 0 {
+            Self::ORDER.len() - 1
+        } else {
+            idx - 1
+        };
+        Self::ORDER[next]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonitoringState {
+    pub route: MonitoringRoute,
+    pub focused_panel: Option<PanelFocus>,
+    pub selected_run_id: Option<String>,
+    pub selected_pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimaryView {
     Home,
     LiveRun,
-    RunExplorer,
-    SystemProcesses,
 }
 
 impl PrimaryView {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 2;
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
             Self::LiveRun => "Live Run",
-            Self::RunExplorer => "Run Explorer",
-            Self::SystemProcesses => "System/Processes",
         }
     }
 
@@ -129,8 +179,6 @@ impl PrimaryView {
         match self {
             Self::Home => 0,
             Self::LiveRun => 1,
-            Self::RunExplorer => 2,
-            Self::SystemProcesses => 3,
         }
     }
 
@@ -138,8 +186,6 @@ impl PrimaryView {
         match index {
             0 => Self::Home,
             1 => Self::LiveRun,
-            2 => Self::RunExplorer,
-            3 => Self::SystemProcesses,
             _ => Self::Home,
         }
     }
@@ -436,7 +482,10 @@ impl HelpState {
 fn keymap_entries(profile: &str) -> Vec<(String, String)> {
     let mut entries = vec![
         ("q / Ctrl+C".to_string(), "Quit".to_string()),
-        ("Tab / Shift+Tab".to_string(), "Switch view".to_string()),
+        (
+            "Tab / Shift+Tab".to_string(),
+            "Cycle Home panel focus".to_string(),
+        ),
         ("1-4".to_string(), "Focus graph".to_string()),
         ("Space".to_string(), "Toggle live/pause".to_string()),
         (
@@ -451,17 +500,29 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
 
     entries.push(("Home: o".to_string(), "Open file picker".to_string()));
     entries.push(("Home: a".to_string(), "Attach to process".to_string()));
-    entries.push(("Home: e".to_string(), "Explore all runs".to_string()));
+    entries.push(("Home: e".to_string(), "Open run detail route".to_string()));
     entries.push(("Home: s".to_string(), "Scan directory".to_string()));
     entries.push(("Home: r".to_string(), "Refresh run list".to_string()));
-    entries.push(("Explorer: j/k".to_string(), "Move cursor".to_string()));
-    entries.push(("Explorer: /".to_string(), "Search runs".to_string()));
-    entries.push(("Explorer: f".to_string(), "Cycle status filter".to_string()));
-    entries.push(("Explorer: Enter".to_string(), "Open active run".to_string()));
-    entries.push(("Explorer: r".to_string(), "Refresh".to_string()));
-    entries.push(("Processes: j/k".to_string(), "Move cursor".to_string()));
-    entries.push(("Processes: a".to_string(), "Attach to process".to_string()));
-    entries.push(("Processes: r".to_string(), "Refresh".to_string()));
+    entries.push(("Runs panel: j/k".to_string(), "Move cursor".to_string()));
+    entries.push(("Runs panel: /".to_string(), "Search runs".to_string()));
+    entries.push((
+        "Runs panel: f".to_string(),
+        "Cycle status filter".to_string(),
+    ));
+    entries.push((
+        "Runs panel: Enter".to_string(),
+        "Open active run".to_string(),
+    ));
+    entries.push(("Runs panel: r".to_string(), "Refresh".to_string()));
+    entries.push((
+        "Processes panel: j/k".to_string(),
+        "Move cursor".to_string(),
+    ));
+    entries.push((
+        "Processes panel: a".to_string(),
+        "Attach to process".to_string(),
+    ));
+    entries.push(("Processes panel: r".to_string(), "Refresh".to_string()));
 
     if profile == "vim" {
         entries.push(("j/k".to_string(), "Switch view (vim)".to_string()));
@@ -599,6 +660,12 @@ impl App {
             discovered_processes: Vec::new(),
             ui_state: UiState {
                 primary_view: PrimaryView::LiveRun,
+                monitoring: MonitoringState {
+                    route: MonitoringRoute::RunDetail,
+                    focused_panel: Some(PanelFocus::Overview),
+                    selected_run_id: None,
+                    selected_pid: None,
+                },
                 focused_box: 1,
                 mode: AppMode::Monitoring,
                 selected_file: None,
@@ -700,7 +767,16 @@ impl App {
                 project_root_str.as_deref(),
             );
         }
-        self.ui_state.primary_view = PrimaryView::LiveRun;
+        self.ui_state.monitoring.selected_pid = Some(candidate.pid);
+        self.set_monitoring_route(MonitoringRoute::RunDetail);
+    }
+
+    fn set_monitoring_route(&mut self, route: MonitoringRoute) {
+        self.ui_state.monitoring.route = route;
+        self.ui_state.primary_view = match route {
+            MonitoringRoute::Home => PrimaryView::Home,
+            MonitoringRoute::RunDetail => PrimaryView::LiveRun,
+        };
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -915,19 +991,8 @@ impl App {
             _ if is_help_key => {
                 self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
             }
-            (KeyCode::Tab, _) => {
-                let next = (self.ui_state.primary_view.index() + 1) % PrimaryView::COUNT;
-                self.ui_state.primary_view = PrimaryView::from_index(next);
-            }
-            (KeyCode::BackTab, _) => {
-                let current = self.ui_state.primary_view.index();
-                let next = if current == 0 {
-                    PrimaryView::COUNT - 1
-                } else {
-                    current - 1
-                };
-                self.ui_state.primary_view = PrimaryView::from_index(next);
-            }
+            (KeyCode::Tab, _) => self.cycle_home_panel(true),
+            (KeyCode::BackTab, _) => self.cycle_home_panel(false),
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 let follow_latest = !self.ui_state.graph_viewports[0].follow_latest;
                 for vp in &mut self.ui_state.graph_viewports {
@@ -951,19 +1016,30 @@ impl App {
                 self.ui_state.system_viewport.offset_samples = 0;
                 self.ui_state.system_viewport.zoom_level = 0;
             }
-            _ => {
-                // Tab-specific commands
-                match self.ui_state.primary_view {
-                    PrimaryView::LiveRun => self.handle_key_live_run(key),
-                    PrimaryView::Home => self.handle_key_home(key),
-                    PrimaryView::RunExplorer => self.handle_key_run_explorer(key),
-                    PrimaryView::SystemProcesses => self.handle_key_system_processes(key),
-                }
-            }
+            _ => self.handle_key_home(key),
         }
     }
 
-    fn handle_key_live_run(&mut self, key: KeyEvent) {
+    fn cycle_home_panel(&mut self, forward: bool) {
+        if !matches!(self.ui_state.mode, AppMode::Monitoring)
+            || !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+        {
+            return;
+        }
+
+        let current = self
+            .ui_state
+            .monitoring
+            .focused_panel
+            .unwrap_or(PanelFocus::Overview);
+        self.ui_state.monitoring.focused_panel = Some(if forward {
+            current.next()
+        } else {
+            current.previous()
+        });
+    }
+
+    fn handle_key_run_detail(&mut self, key: KeyEvent) {
         let is_vim = self.config.keymap_profile == "vim";
         match (key.code, key.modifiers) {
             // Box focus (tab-level)
@@ -1032,16 +1108,52 @@ impl App {
     }
 
     fn handle_key_home(&mut self, key: KeyEvent) {
+        match self.ui_state.monitoring.route {
+            MonitoringRoute::Home => {
+                if self.ui_state.explorer.search_active {
+                    self.handle_key_run_explorer(key);
+                    return;
+                }
+
+                match self
+                    .ui_state
+                    .monitoring
+                    .focused_panel
+                    .unwrap_or(PanelFocus::Overview)
+                {
+                    PanelFocus::Runs => self.handle_key_run_explorer(key),
+                    PanelFocus::Processes => self.handle_key_system_processes(key),
+                    PanelFocus::Overview | PanelFocus::Files => self.handle_key_home_workspace(key),
+                }
+            }
+            MonitoringRoute::RunDetail => self.handle_key_run_detail(key),
+        }
+    }
+
+    fn handle_key_home_workspace(&mut self, key: KeyEvent) {
         match (key.code, key.modifiers) {
             (KeyCode::Char('o'), KeyModifiers::NONE) => {
                 self.ui_state.mode = AppMode::Scanning;
             }
             (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                self.ui_state.primary_view = PrimaryView::RunExplorer;
                 self.refresh_explorer_records();
+                if let Some(record) = self
+                    .ui_state
+                    .explorer
+                    .records
+                    .get(self.ui_state.explorer.selected_idx)
+                {
+                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
+                }
+                self.set_monitoring_route(MonitoringRoute::RunDetail);
             }
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
-                if let Some(candidate) = self.discovered_processes.first().cloned() {
+                if let Some(candidate) = self
+                    .discovered_processes
+                    .get(self.ui_state.selected_process_idx)
+                    .or_else(|| self.discovered_processes.first())
+                    .cloned()
+                {
                     self.attach_process_and_switch(&candidate);
                 }
             }
@@ -1050,6 +1162,7 @@ impl App {
             }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 self.load_recent_runs();
+                self.refresh_explorer_records();
             }
             _ => {}
         }
@@ -1111,8 +1224,9 @@ impl App {
                     .records
                     .get(self.ui_state.explorer.selected_idx)
                 {
+                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
                     if record.status == crate::store::types::RunStatus::Active {
-                        self.ui_state.primary_view = PrimaryView::LiveRun;
+                        self.set_monitoring_route(MonitoringRoute::RunDetail);
                     }
                 }
             }
@@ -2057,7 +2171,7 @@ mod tests {
         assert_eq!(app.training.nan_inf_count, 0);
         assert!(app.training.last_loss_spike_at.is_none());
         assert!(app.training.last_nan_inf_at.is_none());
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
         assert_eq!(app.ui_state.focused_box, 1);
         assert_eq!(app.ui_state.mode, AppMode::Monitoring);
         assert!(app.ui_state.selected_file.is_none());
@@ -2217,10 +2331,10 @@ mod tests {
     fn test_tab_key_cycles_primary_view() {
         let mut app = App::new(Config::default());
         app.ui_state.mode = AppMode::Monitoring;
-        app.ui_state.primary_view = PrimaryView::LiveRun;
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
@@ -2386,7 +2500,7 @@ mod tests {
             ..Config::default()
         });
 
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
         assert_eq!(app.ui_state.focused_box, 1);
 
         let idx = (app.ui_state.focused_box - 1) as usize;
@@ -2475,7 +2589,7 @@ mod tests {
             keymap_profile: "vim".to_string(),
             ..Config::default()
         });
-        app.ui_state.primary_view = PrimaryView::LiveRun;
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -2486,7 +2600,7 @@ mod tests {
         };
 
         assert_eq!(selected_row, 1);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
@@ -2689,33 +2803,33 @@ mod tests {
     #[test]
     fn test_tab_cycles_primary_views_forward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::Home); // wrap
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
     fn test_tab_cycles_primary_views_backward() {
         let mut app = App::new(Config::default());
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         let backtab_key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         app.handle_key(backtab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 
         app.handle_key(backtab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses); // wrap
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
@@ -3658,7 +3772,7 @@ mod tests {
     fn test_app_new() {
         let app = App::new(Config::default());
         assert!(app.running);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
         assert_eq!(app.ui_state.focused_box, 1);
         assert!(app.training.latest.is_none());
     }
@@ -3681,15 +3795,15 @@ mod tests {
     #[test]
     fn test_home_key_e_switches_to_run_explorer() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::Home;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
+        assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
     fn test_home_key_o_enters_scanning_mode() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::Home;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.mode, AppMode::Scanning);
     }
@@ -3697,7 +3811,7 @@ mod tests {
     #[test]
     fn test_home_key_r_refreshes_without_store() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::Home;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert!(app.recent_runs.is_empty());
     }
@@ -3705,7 +3819,8 @@ mod tests {
     #[test]
     fn test_explorer_slash_activates_search() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
         assert!(!app.ui_state.explorer.search_active);
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.ui_state.explorer.search_active);
@@ -3714,7 +3829,8 @@ mod tests {
     #[test]
     fn test_explorer_f_cycles_status_filter() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
 
         use crate::store::types::RunStatus;
         assert!(app.ui_state.explorer.status_filter.is_none());
@@ -3738,7 +3854,8 @@ mod tests {
     #[test]
     fn test_explorer_j_moves_cursor() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
 
         use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
         let dummy_record = RunRecord {
@@ -3771,7 +3888,8 @@ mod tests {
     #[test]
     fn test_explorer_k_moves_cursor_up() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
 
         use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
         let dummy = RunRecord {
@@ -3805,7 +3923,8 @@ mod tests {
     fn test_system_processes_j_moves_cursor() {
         use crate::collectors::process::{ProbeStatus, ProcessCandidate};
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
         app.discovered_processes = vec![
             ProcessCandidate {
                 pid: 1,
@@ -3885,7 +4004,8 @@ mod tests {
     #[test]
     fn test_explorer_search_mode_chars_update_query() {
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
         app.ui_state.explorer.search_active = true;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));

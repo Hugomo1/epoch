@@ -17,7 +17,7 @@ pub mod theme;
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::app::{App, AppMode, PrimaryView};
+use crate::app::{App, AppMode, MonitoringRoute, PanelFocus};
 use crate::ui::theme::resolve_palette_from_config;
 
 // Base palette — dark terminal friendly
@@ -50,13 +50,8 @@ pub fn metric_value_style() -> Style {
     Style::default().fg(ACCENT)
 }
 
-pub fn phase1_primary_views() -> [PrimaryView; 4] {
-    [
-        PrimaryView::Home,
-        PrimaryView::LiveRun,
-        PrimaryView::RunExplorer,
-        PrimaryView::SystemProcesses,
-    ]
+pub fn phase1_primary_views() -> [MonitoringRoute; 2] {
+    [MonitoringRoute::Home, MonitoringRoute::RunDetail]
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -96,11 +91,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::FilePicker(state) => file_picker::render_picker(frame, content_area, state, app),
         AppMode::Help(state) => help::render(frame, content_area, state),
         AppMode::Settings(state) => settings::render(frame, content_area, state),
-        AppMode::Monitoring => match app.ui_state.primary_view {
-            PrimaryView::Home => home::render(frame, content_area, app),
-            PrimaryView::LiveRun => live::render(frame, content_area, app),
-            PrimaryView::RunExplorer => run_explorer::render(frame, content_area, app),
-            PrimaryView::SystemProcesses => system_processes::render(frame, content_area, app),
+        AppMode::Monitoring => match app.ui_state.monitoring.route {
+            MonitoringRoute::Home => home::render(frame, content_area, app),
+            MonitoringRoute::RunDetail => live::render(frame, content_area, app),
         },
     }
 
@@ -115,29 +108,41 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
 
     let (box_cmds, tab_cmds, global_cmds) = match &app.ui_state.mode {
         AppMode::Monitoring => {
-            let box_level = match app.ui_state.primary_view {
-                PrimaryView::LiveRun => {
+            let box_level = match app.ui_state.monitoring.route {
+                MonitoringRoute::RunDetail => {
                     format!(
                         "[{}] -/=:zoom Left/Right:pan j/k:focus",
                         app.ui_state.focused_box
                     )
                 }
-                _ => String::new(),
+                MonitoringRoute::Home => match app.ui_state.monitoring.focused_panel {
+                    Some(panel) => format!("Home panel: {panel:?}"),
+                    None => String::new(),
+                },
             };
-            let tab_level = match app.ui_state.primary_view {
-                PrimaryView::LiveRun => "1-4:box".to_string(),
-                PrimaryView::Home => "o:open  a:attach  e:explore  s:scan  r:refresh".to_string(),
-                PrimaryView::RunExplorer => {
-                    if app.ui_state.explorer.search_active {
-                        "Type:search  Enter:confirm  Esc:cancel".to_string()
-                    } else {
-                        "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+            let tab_level = match app.ui_state.monitoring.route {
+                MonitoringRoute::RunDetail => "1-4:box".to_string(),
+                MonitoringRoute::Home => match app
+                    .ui_state
+                    .monitoring
+                    .focused_panel
+                    .unwrap_or(PanelFocus::Overview)
+                {
+                    PanelFocus::Runs => {
+                        if app.ui_state.explorer.search_active {
+                            "Type:search  Enter:confirm  Esc:cancel".to_string()
+                        } else {
+                            "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+                        }
                     }
-                }
-                PrimaryView::SystemProcesses => "j/k:select  a:attach  r:refresh".to_string(),
+                    PanelFocus::Processes => "j/k:select  a:attach  r:refresh".to_string(),
+                    PanelFocus::Overview | PanelFocus::Files => {
+                        "o:open  a:attach  e:detail  s:scan  r:refresh".to_string()
+                    }
+                },
             };
             let global_level =
-                "?:help s:settings Tab:views Space:pause g:reset q:quit ".to_string();
+                "?:help s:settings Tab:panels Space:pause g:reset q:quit ".to_string();
             (box_level, tab_level, global_level)
         }
         AppMode::Settings(_) => (
@@ -191,19 +196,28 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
 }
 
 pub fn active_commands_for_view(app: &App) -> String {
-    match app.ui_state.primary_view {
-        PrimaryView::LiveRun => {
+    match app.ui_state.monitoring.route {
+        MonitoringRoute::RunDetail => {
             format!("[{}] -/=:zoom Left/Right:pan", app.ui_state.focused_box)
         }
-        PrimaryView::Home => "o:open  a:attach  e:explore  s:scan  r:refresh".to_string(),
-        PrimaryView::RunExplorer => {
-            if app.ui_state.explorer.search_active {
-                "Type:search  Enter:confirm  Esc:cancel".to_string()
-            } else {
-                "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+        MonitoringRoute::Home => match app
+            .ui_state
+            .monitoring
+            .focused_panel
+            .unwrap_or(PanelFocus::Overview)
+        {
+            PanelFocus::Runs => {
+                if app.ui_state.explorer.search_active {
+                    "Type:search  Enter:confirm  Esc:cancel".to_string()
+                } else {
+                    "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+                }
             }
-        }
-        PrimaryView::SystemProcesses => "j/k:select  a:attach  r:refresh".to_string(),
+            PanelFocus::Processes => "j/k:select  a:attach  r:refresh".to_string(),
+            PanelFocus::Overview | PanelFocus::Files => {
+                "o:open  a:attach  e:detail  s:scan  r:refresh".to_string()
+            }
+        },
     }
 }
 
@@ -213,11 +227,9 @@ mod tests {
     use crate::ui::theme::palette_for_name;
 
     #[test]
-    fn test_primary_view_index_roundtrip() {
-        for i in 0..PrimaryView::COUNT {
-            let view = PrimaryView::from_index(i);
-            assert_eq!(view.index(), i);
-        }
+    fn test_monitoring_routes_include_home_and_detail() {
+        let routes = phase1_primary_views();
+        assert_eq!(routes, [MonitoringRoute::Home, MonitoringRoute::RunDetail]);
     }
 
     #[test]
@@ -372,7 +384,7 @@ mod tests {
         let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::Home;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
 
         terminal
             .draw(|frame| {
@@ -402,7 +414,8 @@ mod tests {
         let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
         app.ui_state.explorer.search_active = true;
 
         terminal
@@ -431,7 +444,8 @@ mod tests {
         let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
-        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
 
         terminal
             .draw(|frame| {
@@ -459,13 +473,14 @@ mod tests {
     fn test_active_commands_for_view_matches_monitoring_views() {
         let mut app = App::new(Config::default());
 
-        app.ui_state.primary_view = PrimaryView::Home;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
         assert_eq!(
             active_commands_for_view(&app),
             "o:open  a:attach  e:explore  s:scan  r:refresh"
         );
 
-        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
         assert_eq!(
             active_commands_for_view(&app),
             "j/k:select  /:search  f:filter  Enter:open  r:refresh"
@@ -477,7 +492,8 @@ mod tests {
             "Type:search  Enter:confirm  Esc:cancel"
         );
 
-        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
         app.ui_state.explorer.search_active = false;
         assert_eq!(
             active_commands_for_view(&app),
