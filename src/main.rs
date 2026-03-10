@@ -68,7 +68,6 @@ async fn main() -> Result<()> {
 
         if !config.stdin_mode && config.log_file.is_none() {
             app.ui_state.monitoring.route = epoch::app::MonitoringRoute::Home;
-            app.ui_state.primary_view = epoch::app::PrimaryView::Home;
         }
         app.project_root = project_root.clone();
 
