@@ -40,6 +40,29 @@ fn step_to_i64(step: u64) -> Result<i64> {
     i64::try_from(step).map_err(|_| color_eyre::eyre::eyre!("step value too large for sqlite i64"))
 }
 
+fn row_to_run_record(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
+    let source_kind = row.get::<_, String>(2)?;
+    let status = row.get::<_, String>(6)?;
+    let last_step_i64 = row.get::<_, Option<i64>>(13)?;
+    Ok(RunRecord {
+        run_id: row.get(0)?,
+        source_fingerprint: row.get(1)?,
+        source_kind: RunSourceKind::from_db_value(&source_kind).unwrap_or(RunSourceKind::LogFile),
+        source_locator: row.get(3)?,
+        project_root: row.get(4)?,
+        display_name: row.get(5)?,
+        status: RunStatus::from_db_value(&status).unwrap_or(RunStatus::Active),
+        command: row.get(7)?,
+        cwd: row.get(8)?,
+        git_commit: row.get(9)?,
+        git_dirty: row.get::<_, Option<i64>>(10)?.map(|v| v != 0),
+        started_at_epoch_secs: row.get(11)?,
+        ended_at_epoch_secs: row.get(12)?,
+        last_step: last_step_i64.and_then(|value| u64::try_from(value).ok()),
+        last_updated_epoch_secs: row.get(14)?,
+    })
+}
+
 impl RunStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -193,29 +216,7 @@ impl RunStore {
                 WHERE run_id = ?1
                 ",
                 params![run_id],
-                |row| {
-                    let source_kind = row.get::<_, String>(2)?;
-                    let status = row.get::<_, String>(6)?;
-                    let last_step_i64 = row.get::<_, Option<i64>>(13)?;
-                    Ok(RunRecord {
-                        run_id: row.get(0)?,
-                        source_fingerprint: row.get(1)?,
-                        source_kind: RunSourceKind::from_db_value(&source_kind)
-                            .unwrap_or(RunSourceKind::LogFile),
-                        source_locator: row.get(3)?,
-                        project_root: row.get(4)?,
-                        display_name: row.get(5)?,
-                        status: RunStatus::from_db_value(&status).unwrap_or(RunStatus::Active),
-                        command: row.get(7)?,
-                        cwd: row.get(8)?,
-                        git_commit: row.get(9)?,
-                        git_dirty: row.get::<_, Option<i64>>(10)?.map(|v| v != 0),
-                        started_at_epoch_secs: row.get(11)?,
-                        ended_at_epoch_secs: row.get(12)?,
-                        last_step: last_step_i64.and_then(|value| u64::try_from(value).ok()),
-                        last_updated_epoch_secs: row.get(14)?,
-                    })
-                },
+                row_to_run_record,
             )
             .optional()
             .map_err(Into::into)
@@ -304,5 +305,298 @@ impl RunStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn list_runs(
+        &self,
+        status_filter: Option<&str>,
+        search_query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RunRecord>> {
+        let search_pattern = search_query.map(|q| format!("%{}%", q));
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT
+                run_id,
+                source_fingerprint,
+                source_kind,
+                source_locator,
+                project_root,
+                display_name,
+                status,
+                command,
+                cwd,
+                git_commit,
+                git_dirty,
+                started_at_epoch_secs,
+                ended_at_epoch_secs,
+                last_step,
+                last_updated_epoch_secs
+            FROM runs
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR (display_name LIKE ?2 OR source_locator LIKE ?2))
+            ORDER BY started_at_epoch_secs DESC
+            LIMIT ?3
+            ",
+        )?;
+
+        let mapped = stmt.query_map(
+            params![status_filter, search_pattern, limit_i64],
+            row_to_run_record,
+        )?;
+
+        let mut runs = Vec::new();
+        for row in mapped {
+            runs.push(row?);
+        }
+        Ok(runs)
+    }
+
+    pub fn list_recent_runs(&self, limit: usize) -> Result<Vec<RunRecord>> {
+        self.list_runs(None, None, limit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_runs_empty_store() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+        let runs = store.list_runs(None, None, 10)?;
+        assert_eq!(runs.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_runs_with_limit() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+
+        // Create 5 runs
+        for i in 0..5 {
+            let fingerprint = format!("fp_{}", i);
+            let metadata = RunMetadata {
+                display_name: Some(format!("run_{}", i)),
+                project_root: Some("/project".to_string()),
+                command: Some("python train.py".to_string()),
+                cwd: Some("/project".to_string()),
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                source_locator: Some(format!("train_{}.log", i)),
+            };
+            store.attach_or_create_active_run(&fingerprint, RunSourceKind::LogFile, metadata)?;
+        }
+
+        // Test limit
+        let runs = store.list_runs(None, None, 2)?;
+        assert_eq!(runs.len(), 2);
+
+        // Test no limit (large limit)
+        let runs = store.list_runs(None, None, 100)?;
+        assert_eq!(runs.len(), 5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_runs_status_filter() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+
+        // Create 3 active runs
+        for i in 0..3 {
+            let fingerprint = format!("fp_active_{}", i);
+            let metadata = RunMetadata {
+                display_name: Some(format!("active_{}", i)),
+                project_root: Some("/project".to_string()),
+                command: Some("python train.py".to_string()),
+                cwd: Some("/project".to_string()),
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                source_locator: Some(format!("train_{}.log", i)),
+            };
+            store.attach_or_create_active_run(&fingerprint, RunSourceKind::LogFile, metadata)?;
+        }
+
+        // Create 2 completed runs
+        for i in 0..2 {
+            let fingerprint = format!("fp_completed_{}", i);
+            let metadata = RunMetadata {
+                display_name: Some(format!("completed_{}", i)),
+                project_root: Some("/project".to_string()),
+                command: Some("python train.py".to_string()),
+                cwd: Some("/project".to_string()),
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                source_locator: Some(format!("train_{}.log", i)),
+            };
+            let result = store.attach_or_create_active_run(
+                &fingerprint,
+                RunSourceKind::LogFile,
+                metadata,
+            )?;
+            store.complete_run(&result.run_id, RunStatus::Completed)?;
+        }
+
+        // Filter by active status
+        let active_runs = store.list_runs(Some("active"), None, 100)?;
+        assert_eq!(active_runs.len(), 3);
+        for run in &active_runs {
+            assert_eq!(run.status, RunStatus::Active);
+        }
+
+        // Filter by completed status
+        let completed_runs = store.list_runs(Some("completed"), None, 100)?;
+        assert_eq!(completed_runs.len(), 2);
+        for run in &completed_runs {
+            assert_eq!(run.status, RunStatus::Completed);
+        }
+
+        // No filter returns all
+        let all_runs = store.list_runs(None, None, 100)?;
+        assert_eq!(all_runs.len(), 5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_runs_search_filter() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+
+        // Create runs with different names and locators
+        let metadata1 = RunMetadata {
+            display_name: Some("training_experiment_v1".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python train.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: Some("abc123".to_string()),
+            git_dirty: Some(false),
+            source_locator: Some("logs/train_v1.log".to_string()),
+        };
+        store.attach_or_create_active_run("fp1", RunSourceKind::LogFile, metadata1)?;
+
+        let metadata2 = RunMetadata {
+            display_name: Some("inference_test".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python infer.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: Some("def456".to_string()),
+            git_dirty: Some(false),
+            source_locator: Some("logs/infer_test.log".to_string()),
+        };
+        store.attach_or_create_active_run("fp2", RunSourceKind::LogFile, metadata2)?;
+
+        let metadata3 = RunMetadata {
+            display_name: Some("eval_metrics".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python eval.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: Some("ghi789".to_string()),
+            git_dirty: Some(false),
+            source_locator: Some("logs/eval_metrics.log".to_string()),
+        };
+        store.attach_or_create_active_run("fp3", RunSourceKind::LogFile, metadata3)?;
+
+        // Search by display_name
+        let results = store.list_runs(None, Some("training"), 100)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].display_name,
+            Some("training_experiment_v1".to_string())
+        );
+
+        // Search by source_locator
+        let results = store.list_runs(None, Some("infer"), 100)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display_name, Some("inference_test".to_string()));
+
+        // Search with no matches
+        let results = store.list_runs(None, Some("nonexistent"), 100)?;
+        assert_eq!(results.len(), 0);
+
+        // Search with partial match
+        let results = store.list_runs(None, Some("eval"), 100)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display_name, Some("eval_metrics".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_recent_runs() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+
+        // Create 3 runs
+        for i in 0..3 {
+            let fingerprint = format!("fp_{}", i);
+            let metadata = RunMetadata {
+                display_name: Some(format!("run_{}", i)),
+                project_root: Some("/project".to_string()),
+                command: Some("python train.py".to_string()),
+                cwd: Some("/project".to_string()),
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                source_locator: Some(format!("train_{}.log", i)),
+            };
+            store.attach_or_create_active_run(&fingerprint, RunSourceKind::LogFile, metadata)?;
+        }
+
+        // list_recent_runs should return all with default limit
+        let recent = store.list_recent_runs(10)?;
+        assert_eq!(recent.len(), 3);
+
+        // list_recent_runs with smaller limit
+        let recent = store.list_recent_runs(2)?;
+        assert_eq!(recent.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_runs_combined_filters() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+
+        // Create active runs with different names
+        let metadata1 = RunMetadata {
+            display_name: Some("training_v1".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python train.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: Some("abc123".to_string()),
+            git_dirty: Some(false),
+            source_locator: Some("logs/train_v1.log".to_string()),
+        };
+        store.attach_or_create_active_run("fp1", RunSourceKind::LogFile, metadata1)?;
+
+        let metadata2 = RunMetadata {
+            display_name: Some("training_v2".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python train.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: Some("def456".to_string()),
+            git_dirty: Some(false),
+            source_locator: Some("logs/train_v2.log".to_string()),
+        };
+        let result2 =
+            store.attach_or_create_active_run("fp2", RunSourceKind::LogFile, metadata2)?;
+
+        // Complete the second run
+        store.complete_run(&result2.run_id, RunStatus::Completed)?;
+
+        // Filter by active status AND search for "training"
+        let results = store.list_runs(Some("active"), Some("training"), 100)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display_name, Some("training_v1".to_string()));
+        assert_eq!(results[0].status, RunStatus::Active);
+
+        // Filter by completed status AND search for "training"
+        let results = store.list_runs(Some("completed"), Some("training"), 100)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].display_name, Some("training_v2".to_string()));
+        assert_eq!(results[0].status, RunStatus::Completed);
+
+        Ok(())
     }
 }
