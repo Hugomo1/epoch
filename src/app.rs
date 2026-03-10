@@ -106,16 +106,11 @@ pub struct UiState {
     pub selected_process_idx: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MonitoringRoute {
+    #[default]
     Home,
     RunDetail,
-}
-
-impl Default for MonitoringRoute {
-    fn default() -> Self {
-        Self::Home
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +152,19 @@ pub struct MonitoringState {
     pub focused_panel: Option<PanelFocus>,
     pub selected_run_id: Option<String>,
     pub selected_pid: Option<u32>,
+}
+
+impl MonitoringState {
+    fn resolve_focused_run(&self, records: &[crate::store::types::RunRecord]) -> Option<usize> {
+        self.selected_run_id
+            .as_ref()
+            .and_then(|id| records.iter().position(|record| &record.run_id == id))
+    }
+
+    fn resolve_focused_process(&self, processes: &[ProcessCandidate]) -> Option<usize> {
+        self.selected_pid
+            .and_then(|pid| processes.iter().position(|process| process.pid == pid))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,6 +729,19 @@ impl App {
 
     pub fn refresh_explorer_records(&mut self) {
         if let Some(store) = &self.run_store {
+            let prev_idx = self.ui_state.explorer.selected_idx;
+            let focused_run_id = self
+                .ui_state
+                .monitoring
+                .selected_run_id
+                .clone()
+                .or_else(|| {
+                    self.ui_state
+                        .explorer
+                        .records
+                        .get(prev_idx)
+                        .map(|record| record.run_id.clone())
+                });
             let status_str = self
                 .ui_state
                 .explorer
@@ -734,8 +755,35 @@ impl App {
             };
             self.ui_state.explorer.records =
                 store.list_runs(status_str, query, 100).unwrap_or_default();
-            let max_idx = self.ui_state.explorer.records.len().saturating_sub(1);
-            self.ui_state.explorer.selected_idx = self.ui_state.explorer.selected_idx.min(max_idx);
+
+            if let Some(id) = focused_run_id {
+                self.ui_state.monitoring.selected_run_id = Some(id);
+            }
+
+            let selected_idx = self
+                .ui_state
+                .monitoring
+                .resolve_focused_run(&self.ui_state.explorer.records)
+                .or_else(|| {
+                    if self.ui_state.explorer.records.is_empty() {
+                        None
+                    } else {
+                        Some(prev_idx.min(self.ui_state.explorer.records.len() - 1))
+                    }
+                });
+
+            if let Some(idx) = selected_idx {
+                self.ui_state.explorer.selected_idx = idx;
+                self.ui_state.monitoring.selected_run_id = self
+                    .ui_state
+                    .explorer
+                    .records
+                    .get(idx)
+                    .map(|record| record.run_id.clone());
+            } else {
+                self.ui_state.explorer.selected_idx = 0;
+                self.ui_state.monitoring.selected_run_id = None;
+            }
         }
     }
 
@@ -747,9 +795,113 @@ impl App {
         &mut self,
         processes: Vec<crate::collectors::process::ProcessCandidate>,
     ) {
+        let prev_idx = self.ui_state.selected_process_idx;
+        let focused_pid = self.ui_state.monitoring.selected_pid.or_else(|| {
+            self.discovered_processes
+                .get(prev_idx)
+                .map(|process| process.pid)
+        });
+
         self.discovered_processes = processes;
-        let max_idx = self.discovered_processes.len().saturating_sub(1);
-        self.ui_state.selected_process_idx = self.ui_state.selected_process_idx.min(max_idx);
+
+        if let Some(pid) = focused_pid {
+            self.ui_state.monitoring.selected_pid = Some(pid);
+        }
+
+        let selected_idx = self
+            .ui_state
+            .monitoring
+            .resolve_focused_process(&self.discovered_processes)
+            .or_else(|| {
+                if self.discovered_processes.is_empty() {
+                    None
+                } else {
+                    Some(prev_idx.min(self.discovered_processes.len() - 1))
+                }
+            });
+
+        if let Some(idx) = selected_idx {
+            self.ui_state.selected_process_idx = idx;
+            self.ui_state.monitoring.selected_pid = self
+                .discovered_processes
+                .get(idx)
+                .map(|process| process.pid);
+        } else {
+            self.ui_state.selected_process_idx = 0;
+            self.ui_state.monitoring.selected_pid = None;
+        }
+    }
+
+    fn selected_run_index(&self) -> Option<usize> {
+        self.ui_state
+            .monitoring
+            .resolve_focused_run(&self.ui_state.explorer.records)
+            .or_else(|| {
+                if self.ui_state.explorer.records.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.ui_state
+                            .explorer
+                            .selected_idx
+                            .min(self.ui_state.explorer.records.len() - 1),
+                    )
+                }
+            })
+    }
+
+    fn selected_process_index(&self) -> Option<usize> {
+        self.ui_state
+            .monitoring
+            .resolve_focused_process(&self.discovered_processes)
+            .or_else(|| {
+                if self.discovered_processes.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.ui_state
+                            .selected_process_idx
+                            .min(self.discovered_processes.len() - 1),
+                    )
+                }
+            })
+    }
+
+    fn sync_focused_run_from_index(&mut self) {
+        if self.ui_state.explorer.records.is_empty() {
+            self.ui_state.explorer.selected_idx = 0;
+            self.ui_state.monitoring.selected_run_id = None;
+        } else {
+            let idx = self
+                .ui_state
+                .explorer
+                .selected_idx
+                .min(self.ui_state.explorer.records.len() - 1);
+            self.ui_state.explorer.selected_idx = idx;
+            self.ui_state.monitoring.selected_run_id = self
+                .ui_state
+                .explorer
+                .records
+                .get(idx)
+                .map(|record| record.run_id.clone());
+        }
+    }
+
+    fn sync_focused_process_from_index(&mut self) {
+        if self.discovered_processes.is_empty() {
+            self.ui_state.selected_process_idx = 0;
+            self.ui_state.monitoring.selected_pid = None;
+        } else {
+            let idx = self
+                .ui_state
+                .selected_process_idx
+                .min(self.discovered_processes.len() - 1);
+            self.ui_state.selected_process_idx = idx;
+            self.ui_state.monitoring.selected_pid = self
+                .discovered_processes
+                .get(idx)
+                .map(|process| process.pid);
+        }
     }
 
     fn attach_process_and_switch(
@@ -1137,11 +1289,10 @@ impl App {
             }
             (KeyCode::Char('e'), KeyModifiers::NONE) => {
                 self.refresh_explorer_records();
+                self.sync_focused_run_from_index();
                 if let Some(record) = self
-                    .ui_state
-                    .explorer
-                    .records
-                    .get(self.ui_state.explorer.selected_idx)
+                    .selected_run_index()
+                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
                 {
                     self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
                 }
@@ -1149,8 +1300,8 @@ impl App {
             }
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
                 if let Some(candidate) = self
-                    .discovered_processes
-                    .get(self.ui_state.selected_process_idx)
+                    .selected_process_index()
+                    .and_then(|idx| self.discovered_processes.get(idx))
                     .or_else(|| self.discovered_processes.first())
                     .cloned()
                 {
@@ -1196,10 +1347,12 @@ impl App {
                 let max = self.ui_state.explorer.records.len().saturating_sub(1);
                 self.ui_state.explorer.selected_idx =
                     (self.ui_state.explorer.selected_idx + 1).min(max);
+                self.sync_focused_run_from_index();
             }
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
                 self.ui_state.explorer.selected_idx =
                     self.ui_state.explorer.selected_idx.saturating_sub(1);
+                self.sync_focused_run_from_index();
             }
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
                 self.ui_state.explorer.search_active = true;
@@ -1218,11 +1371,10 @@ impl App {
                 self.refresh_explorer_records();
             }
             (KeyCode::Enter, _) => {
+                self.sync_focused_run_from_index();
                 if let Some(record) = self
-                    .ui_state
-                    .explorer
-                    .records
-                    .get(self.ui_state.explorer.selected_idx)
+                    .selected_run_index()
+                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
                 {
                     self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
                     if record.status == crate::store::types::RunStatus::Active {
@@ -1243,25 +1395,27 @@ impl App {
                 let max = self.discovered_processes.len().saturating_sub(1);
                 self.ui_state.selected_process_idx =
                     (self.ui_state.selected_process_idx + 1).min(max);
+                self.sync_focused_process_from_index();
             }
             (KeyCode::Char('k'), _) | (KeyCode::Up, _)
                 if is_vim || matches!(key.code, KeyCode::Up) =>
             {
                 self.ui_state.selected_process_idx =
                     self.ui_state.selected_process_idx.saturating_sub(1);
+                self.sync_focused_process_from_index();
             }
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                self.sync_focused_process_from_index();
                 if let Some(candidate) = self
-                    .discovered_processes
-                    .get(self.ui_state.selected_process_idx)
+                    .selected_process_index()
+                    .and_then(|idx| self.discovered_processes.get(idx))
                     .cloned()
                 {
                     self.attach_process_and_switch(&candidate);
                 }
             }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                let max = self.discovered_processes.len().saturating_sub(1);
-                self.ui_state.selected_process_idx = self.ui_state.selected_process_idx.min(max);
+                self.sync_focused_process_from_index();
             }
             _ => {}
         }
@@ -2858,7 +3012,7 @@ mod tests {
 
     #[test]
     fn test_primary_view_count() {
-        assert_eq!(PrimaryView::COUNT, 4);
+        assert_eq!(PrimaryView::COUNT, 2);
     }
 
     #[test]
@@ -3732,7 +3886,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(key, desc)| key == "Tab / Shift+Tab" && desc == "Switch view")
+                .any(|(key, desc)| key == "Tab / Shift+Tab" && desc == "Cycle Home panel focus")
         );
     }
 
@@ -3875,14 +4029,24 @@ mod tests {
             last_step: None,
             last_updated_epoch_secs: 0,
         };
-        app.ui_state.explorer.records = vec![dummy_record.clone(), dummy_record];
+        let mut second_record = dummy_record.clone();
+        second_record.run_id = "r2".to_string();
+        app.ui_state.explorer.records = vec![dummy_record, second_record];
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 1);
+        assert_eq!(
+            app.ui_state.monitoring.selected_run_id.as_deref(),
+            Some("r2")
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 1);
+        assert_eq!(
+            app.ui_state.monitoring.selected_run_id.as_deref(),
+            Some("r2")
+        );
     }
 
     #[test]
@@ -3909,14 +4073,25 @@ mod tests {
             last_step: None,
             last_updated_epoch_secs: 0,
         };
-        app.ui_state.explorer.records = vec![dummy.clone(), dummy];
+        let mut second = dummy.clone();
+        second.run_id = "r2".to_string();
+        app.ui_state.explorer.records = vec![dummy, second];
         app.ui_state.explorer.selected_idx = 1;
+        app.ui_state.monitoring.selected_run_id = Some("r2".to_string());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
+        assert_eq!(
+            app.ui_state.monitoring.selected_run_id.as_deref(),
+            Some("r1")
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
+        assert_eq!(
+            app.ui_state.monitoring.selected_run_id.as_deref(),
+            Some("r1")
+        );
     }
 
     #[test]
@@ -3949,9 +4124,11 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.ui_state.selected_process_idx, 1);
+        assert_eq!(app.ui_state.monitoring.selected_pid, Some(2));
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.ui_state.selected_process_idx, 1);
+        assert_eq!(app.ui_state.monitoring.selected_pid, Some(2));
     }
 
     #[test]
@@ -3981,6 +4158,91 @@ mod tests {
             },
         ]);
         assert_eq!(app.ui_state.selected_process_idx, 1);
+        assert_eq!(app.ui_state.monitoring.selected_pid, Some(2));
+    }
+
+    #[test]
+    fn test_set_discovered_processes_resolves_selection_by_pid() {
+        use crate::collectors::process::{ProbeStatus, ProcessCandidate};
+
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.selected_pid = Some(42);
+
+        app.set_discovered_processes(vec![
+            ProcessCandidate {
+                pid: 3,
+                command: "a".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+            ProcessCandidate {
+                pid: 42,
+                command: "b".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+        ]);
+
+        assert_eq!(app.ui_state.selected_process_idx, 1);
+        assert_eq!(app.ui_state.monitoring.selected_pid, Some(42));
+    }
+
+    #[test]
+    fn test_selected_run_index_resolves_selection_by_run_id() {
+        use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
+
+        let mut app = App::new(Config::default());
+        let run_a = RunRecord {
+            run_id: "run-a".to_string(),
+            source_fingerprint: "fp-a".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: Some("a.log".to_string()),
+            project_root: None,
+            display_name: Some("A".to_string()),
+            status: RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 1,
+            ended_at_epoch_secs: None,
+            last_step: Some(1),
+            last_updated_epoch_secs: 1,
+        };
+        let run_b = RunRecord {
+            run_id: "run-b".to_string(),
+            source_fingerprint: "fp-b".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: Some("b.log".to_string()),
+            project_root: None,
+            display_name: Some("B".to_string()),
+            status: RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 2,
+            ended_at_epoch_secs: None,
+            last_step: Some(2),
+            last_updated_epoch_secs: 2,
+        };
+
+        app.ui_state.explorer.records = vec![run_a.clone(), run_b.clone()];
+        app.ui_state.explorer.selected_idx = 0;
+        app.ui_state.monitoring.selected_run_id = Some("run-a".to_string());
+
+        app.ui_state.explorer.records = vec![run_b, run_a];
+        assert_eq!(app.selected_run_index(), Some(1));
+        assert_eq!(
+            app.ui_state.monitoring.selected_run_id.as_deref(),
+            Some("run-a")
+        );
     }
 
     #[test]
@@ -3997,8 +4259,8 @@ mod tests {
     fn test_keymap_entries_contains_new_bindings() {
         let entries = keymap_entries("default");
         assert!(entries.iter().any(|(k, _)| k == "Home: e"));
-        assert!(entries.iter().any(|(k, _)| k == "Explorer: /"));
-        assert!(entries.iter().any(|(k, _)| k == "Processes: a"));
+        assert!(entries.iter().any(|(k, _)| k == "Runs panel: /"));
+        assert!(entries.iter().any(|(k, _)| k == "Processes panel: a"));
     }
 
     #[test]
