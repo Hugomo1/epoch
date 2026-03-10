@@ -21,7 +21,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )
         .optional()?;
 
-    if let Some(version) = existing_version {
+    if let Some(version) = existing_version.as_deref() {
         let parsed = version.parse::<i64>().unwrap_or(-1);
         if parsed > SCHEMA_VERSION {
             color_eyre::eyre::bail!(
@@ -72,10 +72,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         ",
     )?;
 
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?1)",
-        params![SCHEMA_VERSION.to_string()],
-    )?;
+    let target_version = SCHEMA_VERSION.to_string();
+    if existing_version.as_deref() != Some(target_version.as_str()) {
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?1)",
+            params![target_version],
+        )?;
+    }
 
     Ok(())
 }

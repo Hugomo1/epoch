@@ -1,9 +1,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use color_eyre::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use ulid::Ulid;
 
 use crate::store::schema;
@@ -65,10 +67,26 @@ fn row_to_run_record(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
 
 impl RunStore {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        schema::migrate(&conn)?;
-        Ok(Self { conn })
+        const MAX_ATTEMPTS: usize = 20;
+        const RETRY_DELAY: Duration = Duration::from_millis(50);
+
+        let mut last_error = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            match Self::open_once(path) {
+                Ok(store) => return Ok(store),
+                Err(err) if Self::is_lock_error(&err) && attempt + 1 < MAX_ATTEMPTS => {
+                    last_error = Some(err);
+                    thread::sleep(RETRY_DELAY);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        match last_error {
+            Some(err) => Err(err),
+            None => color_eyre::eyre::bail!("failed to open run store after retries"),
+        }
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -356,6 +374,32 @@ impl RunStore {
 
     pub fn list_recent_runs(&self, limit: usize) -> Result<Vec<RunRecord>> {
         self.list_runs(None, None, limit)
+    }
+
+    fn open_once(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(10))?;
+        if !Self::is_wal_mode(&conn)? {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        schema::migrate(&conn)?;
+        Ok(Self { conn })
+    }
+
+    fn is_wal_mode(conn: &Connection) -> Result<bool> {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        Ok(mode.eq_ignore_ascii_case("wal"))
+    }
+
+    fn is_lock_error(err: &color_eyre::Report) -> bool {
+        let message = err.to_string().to_lowercase();
+        message.contains("database is locked") || message.contains("database schema is locked")
     }
 }
 

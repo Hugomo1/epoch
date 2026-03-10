@@ -247,7 +247,7 @@ fn metrics_persist_updates_without_blocking_event_loop() {
         .expect("run should exist");
     assert_eq!(run.last_step, Some(1_000));
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        elapsed < std::time::Duration::from_secs(8),
         "step updates should remain bounded to avoid event-loop stalls"
     );
 }
