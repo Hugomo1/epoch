@@ -237,6 +237,12 @@ pub enum RunDetailFocusTarget {
     GradNorm,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunDetailState {
+    pub selected_run_id: Option<String>,
+    pub compare_run_id: Option<String>,
+}
+
 impl RunDetailFocusTarget {
     const ORDER: [Self; 4] = [Self::Core, Self::Eval, Self::LearningRate, Self::GradNorm];
 
@@ -287,13 +293,14 @@ pub struct MonitoringState {
     pub focused_panel: Option<PanelFocus>,
     pub home_focus: HomeFocusTarget,
     pub run_detail_focus: RunDetailFocusTarget,
-    pub selected_run_id: Option<String>,
+    pub run_detail: RunDetailState,
     pub selected_pid: Option<u32>,
 }
 
 impl MonitoringState {
     fn resolve_focused_run(&self, records: &[crate::store::types::RunRecord]) -> Option<usize> {
-        self.selected_run_id
+        self.run_detail
+            .selected_run_id
             .as_ref()
             .and_then(|id| records.iter().position(|record| &record.run_id == id))
     }
@@ -826,7 +833,7 @@ impl App {
                     focused_panel: Some(PanelFocus::Overview),
                     home_focus: HomeFocusTarget::Overview,
                     run_detail_focus: RunDetailFocusTarget::Core,
-                    selected_run_id: None,
+                    run_detail: RunDetailState::default(),
                     selected_pid: None,
                 },
                 focused_box: 1,
@@ -888,6 +895,7 @@ impl App {
             let focused_run_id = self
                 .ui_state
                 .monitoring
+                .run_detail
                 .selected_run_id
                 .clone()
                 .or_else(|| {
@@ -912,7 +920,7 @@ impl App {
                 store.list_runs(status_str, query, 100).unwrap_or_default();
 
             if let Some(id) = focused_run_id {
-                self.ui_state.monitoring.selected_run_id = Some(id);
+                self.ui_state.monitoring.run_detail.selected_run_id = Some(id);
             }
 
             let selected_idx = self
@@ -929,7 +937,7 @@ impl App {
 
             if let Some(idx) = selected_idx {
                 self.ui_state.explorer.selected_idx = idx;
-                self.ui_state.monitoring.selected_run_id = self
+                self.ui_state.monitoring.run_detail.selected_run_id = self
                     .ui_state
                     .explorer
                     .records
@@ -937,7 +945,7 @@ impl App {
                     .map(|record| record.run_id.clone());
             } else {
                 self.ui_state.explorer.selected_idx = 0;
-                self.ui_state.monitoring.selected_run_id = None;
+                self.ui_state.monitoring.run_detail.selected_run_id = None;
             }
         }
     }
@@ -1025,7 +1033,7 @@ impl App {
     fn sync_focused_run_from_index(&mut self) {
         if self.ui_state.explorer.records.is_empty() {
             self.ui_state.explorer.selected_idx = 0;
-            self.ui_state.monitoring.selected_run_id = None;
+            self.ui_state.monitoring.run_detail.selected_run_id = None;
         } else {
             let idx = self
                 .ui_state
@@ -1033,7 +1041,7 @@ impl App {
                 .selected_idx
                 .min(self.ui_state.explorer.records.len() - 1);
             self.ui_state.explorer.selected_idx = idx;
-            self.ui_state.monitoring.selected_run_id = self
+            self.ui_state.monitoring.run_detail.selected_run_id = self
                 .ui_state
                 .explorer
                 .records
@@ -1492,7 +1500,8 @@ impl App {
                     .selected_run_index()
                     .and_then(|idx| self.ui_state.explorer.records.get(idx))
                 {
-                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
+                    self.ui_state.monitoring.run_detail.selected_run_id =
+                        Some(record.run_id.clone());
                     self.set_monitoring_route(MonitoringRoute::RunDetail);
                 }
                 true
@@ -1598,7 +1607,8 @@ impl App {
                     .selected_run_index()
                     .and_then(|idx| self.ui_state.explorer.records.get(idx))
                 {
-                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
+                    self.ui_state.monitoring.run_detail.selected_run_id =
+                        Some(record.run_id.clone());
                 }
                 self.update_home_focus_target(self.current_home_focus_target());
                 self.set_monitoring_route(MonitoringRoute::RunDetail);
@@ -1745,6 +1755,22 @@ impl App {
         } else {
             DataHealthState::NoData
         }
+    }
+
+    pub fn run_detail_selected_run_id(&self) -> Option<&str> {
+        self.ui_state
+            .monitoring
+            .run_detail
+            .selected_run_id
+            .as_deref()
+    }
+
+    pub fn run_detail_compare_run_id(&self) -> Option<&str> {
+        self.ui_state
+            .monitoring
+            .run_detail
+            .compare_run_id
+            .as_deref()
     }
 
     pub fn graph_viewport_series(
@@ -4333,14 +4359,22 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 1);
         assert_eq!(
-            app.ui_state.monitoring.selected_run_id.as_deref(),
+            app.ui_state
+                .monitoring
+                .run_detail
+                .selected_run_id
+                .as_deref(),
             Some("r2")
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 1);
         assert_eq!(
-            app.ui_state.monitoring.selected_run_id.as_deref(),
+            app.ui_state
+                .monitoring
+                .run_detail
+                .selected_run_id
+                .as_deref(),
             Some("r2")
         );
     }
@@ -4373,19 +4407,27 @@ mod tests {
         second.run_id = "r2".to_string();
         app.ui_state.explorer.records = vec![dummy, second];
         app.ui_state.explorer.selected_idx = 1;
-        app.ui_state.monitoring.selected_run_id = Some("r2".to_string());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("r2".to_string());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
         assert_eq!(
-            app.ui_state.monitoring.selected_run_id.as_deref(),
+            app.ui_state
+                .monitoring
+                .run_detail
+                .selected_run_id
+                .as_deref(),
             Some("r1")
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
         assert_eq!(
-            app.ui_state.monitoring.selected_run_id.as_deref(),
+            app.ui_state
+                .monitoring
+                .run_detail
+                .selected_run_id
+                .as_deref(),
             Some("r1")
         );
     }
@@ -4531,12 +4573,16 @@ mod tests {
 
         app.ui_state.explorer.records = vec![run_a.clone(), run_b.clone()];
         app.ui_state.explorer.selected_idx = 0;
-        app.ui_state.monitoring.selected_run_id = Some("run-a".to_string());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-a".to_string());
 
         app.ui_state.explorer.records = vec![run_b, run_a];
         assert_eq!(app.selected_run_index(), Some(1));
         assert_eq!(
-            app.ui_state.monitoring.selected_run_id.as_deref(),
+            app.ui_state
+                .monitoring
+                .run_detail
+                .selected_run_id
+                .as_deref(),
             Some("run-a")
         );
     }

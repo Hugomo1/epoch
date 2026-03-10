@@ -93,7 +93,15 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Settings(state) => settings::render(frame, content_area, state),
         AppMode::Monitoring => match app.ui_state.monitoring.route {
             MonitoringRoute::Home => home::render(frame, content_area, app),
-            MonitoringRoute::RunDetail => live::render(frame, content_area, app),
+            MonitoringRoute::RunDetail => live::render_for_surface(
+                frame,
+                content_area,
+                app,
+                live::LiveSurface::RunDetail {
+                    selected_run_id: app.run_detail_selected_run_id(),
+                    compare_run_id: app.run_detail_compare_run_id(),
+                },
+            ),
         },
     }
 

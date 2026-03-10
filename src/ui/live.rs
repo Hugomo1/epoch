@@ -5,27 +5,73 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, DataHealthState};
+use crate::app::{App, DataHealthState, MonitoringRoute};
 use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveSurface<'a> {
+    Primary,
+    RunDetail {
+        selected_run_id: Option<&'a str>,
+        compare_run_id: Option<&'a str>,
+    },
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let surface = match app.ui_state.monitoring.route {
+        MonitoringRoute::RunDetail => LiveSurface::RunDetail {
+            selected_run_id: app.run_detail_selected_run_id(),
+            compare_run_id: app.run_detail_compare_run_id(),
+        },
+        MonitoringRoute::Home => LiveSurface::Primary,
+    };
+
+    render_for_surface(frame, area, app, surface);
+}
+
+pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: LiveSurface<'_>) {
     let palette = resolve_palette_from_config(&app.config);
 
-    if app.training.latest.is_none() {
-        let text = "No training metrics received yet.\nStart a training run and pipe output via --stdin or --log-file";
-        let paragraph = Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(palette.muted));
-        let vertical = Layout::default()
+    if let LiveSurface::RunDetail {
+        selected_run_id: None,
+        ..
+    } = surface
+    {
+        render_empty_state(
+            frame,
+            area,
+            &palette,
+            "No run selected.\nSelect a run on Home and press Enter to open Run Detail.",
+        );
+        return;
+    }
+
+    let content_area = if let LiveSurface::RunDetail {
+        selected_run_id: Some(run_id),
+        ..
+    } = surface
+    {
+        let [context_area, content_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(2),
-                Constraint::Fill(1),
-            ])
-            .split(area);
-        frame.render_widget(paragraph, vertical[1]);
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .areas(area);
+        let run_context = Paragraph::new(format!("Run Detail: {run_id}"))
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(palette.muted));
+        frame.render_widget(run_context, context_area);
+        content_area
+    } else {
+        area
+    };
+
+    if app.training.latest.is_none() {
+        render_empty_state(
+            frame,
+            content_area,
+            &palette,
+            "No training metrics received yet.\nStart a training run and pipe output via --stdin or --log-file",
+        );
         return;
     }
 
@@ -35,7 +81,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let [graph_area, panel_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(30)])
-        .areas(area);
+        .areas(content_area);
 
     // Graphs layout: vertical stack
     let [loss_area, eval_area, lr_grad_area] = Layout::default()
@@ -141,6 +187,26 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     render_core_panel(frame, core_area, app, &palette);
     render_signals_panel(frame, signals_area, app, &palette);
     render_alerts_panel(frame, alerts_area, app, &palette);
+}
+
+fn render_empty_state(
+    frame: &mut Frame,
+    area: Rect,
+    palette: &crate::ui::theme::ThemePalette,
+    text: &str,
+) {
+    let paragraph = Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(palette.muted));
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+        ])
+        .split(area);
+    frame.render_widget(paragraph, vertical[1]);
 }
 
 fn render_stability_sidebar(
@@ -456,6 +522,7 @@ fn anomaly_age(ts: Option<std::time::Instant>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::MonitoringRoute;
     use crate::config::Config;
     use crate::types::TrainingMetrics;
     use ratatui::Terminal;
@@ -465,12 +532,26 @@ mod tests {
     fn test_live_empty_state() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::new(Config::default());
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
         terminal.draw(|f| render(f, f.area(), &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let content = buffer_to_string(buffer);
         assert!(content.contains("No training metrics"));
+    }
+
+    #[test]
+    fn test_run_detail_requires_selected_run() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(Config::default());
+
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = buffer_to_string(buffer);
+
+        assert!(content.contains("No run selected"));
     }
 
     #[test]
