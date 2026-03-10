@@ -3,6 +3,7 @@ use ratatui::layout::Alignment;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::time::Duration;
 
 use crate::ui::theme::ThemePalette;
 
@@ -110,4 +111,11 @@ pub fn format_epoch_date(secs: i64) -> String {
     let m = (sec_in_day % 3600) / 60;
 
     format!("{} {:02} {:02}:{:02}", m_str, d, h, m)
+}
+
+pub fn format_duration(duration: Duration) -> String {
+    let hours = duration.as_secs() / 3600;
+    let minutes = (duration.as_secs() % 3600) / 60;
+    let seconds = duration.as_secs() % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }

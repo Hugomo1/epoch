@@ -6,6 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, DataHealthState, MonitoringRoute};
+use crate::ui::components::{format_duration, format_step};
 use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
@@ -282,15 +283,10 @@ fn render_core_panel(
 
     let latest = app.training.latest.as_ref();
 
-    let elapsed = app.elapsed();
-    let time_text = if app.training.start_time.is_some() {
-        let hours = elapsed.as_secs() / 3600;
-        let mins = (elapsed.as_secs() % 3600) / 60;
-        let secs = elapsed.as_secs() % 60;
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
-    } else {
-        "Idle".to_string()
-    };
+    let time_text = app
+        .selected_run_elapsed()
+        .map(format_duration)
+        .unwrap_or_else(|| "Idle".to_string());
 
     let (status_text, status_color) = match app.training_data_health_state() {
         DataHealthState::Live => (DataHealthState::Live.label(), palette.success),
@@ -478,20 +474,6 @@ fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
     } else {
         "→"
     }
-}
-
-fn format_step(step: u64) -> String {
-    let s = step.to_string();
-    let mut result = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    for (i, c) in chars.into_iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
 }
 
 fn format_lr_value(lr: f64) -> String {

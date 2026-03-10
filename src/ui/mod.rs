@@ -17,7 +17,7 @@ pub mod theme;
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::app::{App, AppMode, MonitoringRoute, PanelFocus};
+use crate::app::{App, AppMode, MonitoringRoute};
 use crate::ui::theme::resolve_palette_from_config;
 
 // Base palette — dark terminal friendly
@@ -73,9 +73,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
-    // Main layout: header (3) | content (fill) | status bar (1)
     let [header_area, content_area, status_area] = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(2),
+        ratatui::layout::Constraint::Length(1),
         ratatui::layout::Constraint::Min(0),
         ratatui::layout::Constraint::Length(1),
     ])
@@ -114,55 +113,30 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
         .fg(palette.header_fg)
         .bg(palette.header_bg);
 
-    let (box_cmds, tab_cmds, global_cmds) = match &app.ui_state.mode {
+    let (panel_cmds, global_cmds) = match &app.ui_state.mode {
         AppMode::Monitoring => {
-            let route = app.ui_state.monitoring.route;
-            let focused_panel = app.ui_state.monitoring.focused_panel;
-            let metadata = route.metadata(focused_panel);
-            let box_level = match route {
-                MonitoringRoute::RunDetail => {
-                    format!("[{}] {}", app.ui_state.focused_box, metadata.panel_hints)
+            let prefix = match app.ui_state.monitoring.route {
+                MonitoringRoute::Home => {
+                    format!("[{}:{}]", app.home_focus_index(), app.home_focus_label())
                 }
-                MonitoringRoute::Home => metadata.focus_hint.to_string(),
+                MonitoringRoute::RunDetail => {
+                    format!(
+                        "[{}:{}]",
+                        app.ui_state.focused_box,
+                        app.run_detail_focus_label()
+                    )
+                }
             };
-            let tab_level = if matches!(route, MonitoringRoute::Home)
-                && matches!(focused_panel, Some(PanelFocus::Runs))
-                && app.ui_state.explorer.search_active
-            {
-                metadata
-                    .search_hints
-                    .unwrap_or(metadata.panel_hints)
-                    .to_string()
-            } else {
-                metadata.panel_hints.to_string()
-            };
-
-            let mut global_parts = Vec::new();
-            if let Some(back_hint) = metadata.back_hint {
-                global_parts.push(back_hint);
-            }
-            if let Some(drill_hint) = metadata.drill_hint {
-                global_parts.push(drill_hint);
-            }
-            global_parts.push("?:help");
-            global_parts.push("s:settings");
-            global_parts.push("Tab:panels");
-            global_parts.push("Space:pause");
-            global_parts.push("g:reset");
-            global_parts.push("q:quit");
-            let global_level = global_parts.join(" ");
-            (box_level, tab_level, global_level)
+            (
+                format!("{prefix} {}", app.active_panel_commands()),
+                app.monitoring_global_commands(),
+            )
         }
         AppMode::Settings(_) => (
-            String::new(),
-            " Up/Down:row Left/Right:change a:apply w/Enter:save Esc:cancel".to_string(),
-            String::new(),
-        ),
-        AppMode::Help(_) => (
-            " ?:close Esc:close".to_string(),
-            String::new(),
+            "Up/Down:row  Left/Right:change  a:apply  w/Enter:save  Esc:cancel".to_string(),
             String::new(),
         ),
+        AppMode::Help(_) => ("?:close  Esc:close".to_string(), String::new()),
         AppMode::FilePicker(state) => {
             let cmds = if app.config.keymap_profile == "vim" {
                 match state.input_mode {
@@ -174,61 +148,36 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
                     }
                 }
             } else {
-                " Type:filter Up/Down:select Enter:open Esc:quit".to_string()
+                "Type:filter  Up/Down:select  Enter:open  Esc:quit".to_string()
             };
-            (String::new(), cmds, String::new())
+            (cmds, String::new())
         }
-        AppMode::Scanning => (
-            " Scanning files...".to_string(),
-            String::new(),
-            String::new(),
-        ),
+        AppMode::Scanning => ("Scanning files...".to_string(), String::new()),
     };
 
-    let [box_area, tab_area, global_area] = ratatui::layout::Layout::horizontal([
-        ratatui::layout::Constraint::Fill(1),
+    let [panel_area, global_area] = ratatui::layout::Layout::horizontal([
         ratatui::layout::Constraint::Fill(1),
         ratatui::layout::Constraint::Fill(1),
     ])
     .areas(area);
 
-    let box_widget = ratatui::widgets::Paragraph::new(box_cmds).style(bar_style);
-    let tab_widget = ratatui::widgets::Paragraph::new(tab_cmds).style(bar_style);
+    let panel_widget = ratatui::widgets::Paragraph::new(panel_cmds).style(bar_style);
     let global_widget = ratatui::widgets::Paragraph::new(global_cmds)
         .alignment(ratatui::layout::Alignment::Right)
         .style(bar_style);
 
-    frame.render_widget(box_widget, box_area);
-    frame.render_widget(tab_widget, tab_area);
+    frame.render_widget(panel_widget, panel_area);
     frame.render_widget(global_widget, global_area);
 }
 
 pub fn active_commands_for_view(app: &App) -> String {
-    let route = app.ui_state.monitoring.route;
-    let focused_panel = app.ui_state.monitoring.focused_panel;
-    let metadata = route.metadata(focused_panel);
-
-    if matches!(route, MonitoringRoute::Home)
-        && matches!(focused_panel, Some(PanelFocus::Runs))
-        && app.ui_state.explorer.search_active
-    {
-        return metadata
-            .search_hints
-            .unwrap_or(metadata.panel_hints)
-            .to_string();
-    }
-
-    match route {
-        MonitoringRoute::RunDetail => {
-            format!("[{}] {}", app.ui_state.focused_box, metadata.panel_hints)
-        }
-        MonitoringRoute::Home => metadata.panel_hints.to_string(),
-    }
+    app.active_panel_commands()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::PanelFocus;
     use crate::ui::theme::palette_for_name;
 
     #[test]
@@ -352,7 +301,7 @@ mod tests {
             })
             .collect::<Vec<String>>()
             .join("\n");
-        assert!(content.contains("Tab:panels"));
+        assert!(content.contains("Tab/Shift+Tab:cycle"));
     }
 
     #[test]
@@ -403,10 +352,7 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        assert!(content.contains("o:open"));
-        assert!(content.contains("a:attach"));
-        assert!(content.contains("e:detail"));
-        assert!(content.contains("s:scan"));
+        assert!(content.contains("Enter:view current run") || content.contains("r:refresh runs"));
         assert!(content.contains("r:refresh"));
     }
 
@@ -436,8 +382,9 @@ mod tests {
             .join("\n");
 
         assert!(content.contains("Type:search"));
-        assert!(content.contains("Enter:confirm"));
-        assert!(content.contains("Esc:cancel"));
+        assert!(content.contains("Backspace:erase"));
+        assert!(content.contains("Enter:apply"));
+        assert!(content.contains("Esc:close"));
     }
 
     #[test]
@@ -464,8 +411,8 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        assert!(content.contains("j/k:select"));
-        assert!(content.contains("a:attach"));
+        assert!(content.contains("Up/Down:select"));
+        assert!(content.contains("Enter:attach process"));
         assert!(content.contains("r:refresh"));
         assert!(!content.contains("t:track"));
     }
@@ -475,30 +422,29 @@ mod tests {
         let mut app = App::new(Config::default());
 
         app.ui_state.monitoring.route = MonitoringRoute::Home;
-        assert_eq!(
-            active_commands_for_view(&app),
-            "o:open  a:attach  e:detail  s:scan  r:refresh"
-        );
+        assert_eq!(active_commands_for_view(&app), "r:refresh runs");
 
         app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+        app.ui_state.monitoring.home_focus = crate::app::HomeFocusTarget::Runs;
         assert_eq!(
             active_commands_for_view(&app),
-            "j/k:select  /:search  f:filter  Enter:open  r:refresh"
+            "Up/Down:select  /:search  f:filter  Enter:view run  r:refresh"
         );
 
         app.ui_state.explorer.search_active = true;
         assert_eq!(
             active_commands_for_view(&app),
-            "Type:search  Enter:confirm  Esc:cancel"
+            "Type:search  Backspace:erase  Enter:apply  Esc:close"
         );
 
         app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
+        app.ui_state.monitoring.home_focus = crate::app::HomeFocusTarget::Processes;
         app.ui_state.explorer.search_active = false;
         assert_eq!(
             active_commands_for_view(&app),
-            "j/k:select  a:attach  r:refresh"
+            "Up/Down:select  Enter:attach process  r:refresh"
         );
     }
 

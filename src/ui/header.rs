@@ -2,14 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::Paragraph;
 
-use crate::app::App;
+use crate::app::{App, MonitoringRoute};
+use crate::ui::components::{format_duration, format_step};
 use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = resolve_palette_from_config(&app.config);
 
-    let [info_area, views_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    let [nav_area, meta_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Fill(1)]).areas(area);
 
     let nav_meta = app
         .ui_state
@@ -38,60 +39,52 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ))
     };
-    let views = Paragraph::new(nav_spans).style(
+    let nav = Paragraph::new(nav_spans).style(
         ratatui::style::Style::default()
             .fg(palette.header_fg)
             .bg(palette.header_bg),
     );
-    frame.render_widget(views, views_area);
+    frame.render_widget(nav, nav_area);
 
-    let elapsed = app.elapsed();
-    let hours = elapsed.as_secs() / 3600;
-    let minutes = (elapsed.as_secs() % 3600) / 60;
-    let seconds = elapsed.as_secs() % 60;
-
-    let data_health = app.training_data_health_state();
-    let viewport_status = if app.ui_state.graph_viewports[0].follow_latest {
-        "LIVE"
-    } else {
-        "PAUSED"
-    };
-
-    let [title_area, meta_area] = Layout::horizontal([
-        Constraint::Length(5), // "epoch"
-        Constraint::Min(0),
-    ])
-    .areas(info_area);
-
-    let title = Paragraph::new("epoch").style(
-        ratatui::style::Style::default()
-            .fg(palette.accent)
-            .bg(palette.header_bg)
-            .add_modifier(ratatui::style::Modifier::BOLD),
-    );
-
-    let meta = ratatui::text::Line::from(vec![
-        ratatui::text::Span::styled(
-            format!("{} ", viewport_status),
-            ratatui::style::Style::default().fg(if app.ui_state.graph_viewports[0].follow_latest {
-                palette.success
+    let mut meta_parts = Vec::new();
+    match app.ui_state.monitoring.route {
+        MonitoringRoute::Home => {
+            meta_parts.push(format!(
+                "Focus {}:{}",
+                app.home_focus_index(),
+                app.home_focus_label()
+            ));
+            meta_parts.push(format!(
+                "Visible runs {}",
+                app.ui_state.explorer.records.len()
+            ));
+            meta_parts.push(format!("Active {}", app.active_run_count()));
+        }
+        MonitoringRoute::RunDetail => {
+            meta_parts.push(format!(
+                "Focus {}:{}",
+                app.ui_state.focused_box,
+                app.run_detail_focus_label()
+            ));
+            if let Some(step) = app.current_run_step() {
+                meta_parts.push(format!("Step {}", format_step(step)));
+            }
+            if let Some(duration) = app.selected_run_elapsed() {
+                meta_parts.push(format!("Run {}", format_duration(duration)));
+            }
+            meta_parts.push(if app.ui_state.graph_viewports[0].follow_latest {
+                "Viewport live".to_string()
             } else {
-                palette.warning
-            }),
-        ),
-        ratatui::text::Span::styled(
-            format!(
-                "| Data: {} | Parser: {} | Keymap: {} | Elapsed: {:02}:{:02}:{:02}",
-                data_health.label(),
-                app.config.parser,
-                app.config.keymap_profile,
-                hours,
-                minutes,
-                seconds,
-            ),
-            ratatui::style::Style::default().fg(palette.muted),
-        ),
-    ]);
+                "Viewport paused".to_string()
+            });
+        }
+    }
+    meta_parts.push(format!("Keymap {}", app.config.keymap_profile));
+
+    let meta = ratatui::text::Line::from(ratatui::text::Span::styled(
+        meta_parts.join(" | "),
+        ratatui::style::Style::default().fg(palette.muted),
+    ));
 
     let meta = Paragraph::new(meta)
         .alignment(ratatui::layout::Alignment::Right)
@@ -101,7 +94,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(palette.header_bg),
         );
 
-    frame.render_widget(title, title_area);
     frame.render_widget(meta, meta_area);
 }
 
@@ -125,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_header_shows_title() {
+    fn test_header_uses_breadcrumb_and_not_epoch_title() {
         let backend = TestBackend::new(80, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App::new(Config::default());
@@ -136,18 +128,18 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let mut found = false;
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                if buffer.cell((x, y)).unwrap().symbol() == "e"
-                    && buffer.cell((x + 1, y)).unwrap().symbol() == "p"
-                {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        assert!(found);
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Run Detail"));
+        assert!(content.contains("Focus 1:Core"));
+        assert!(!content.contains("epoch"));
     }
 
     #[test]

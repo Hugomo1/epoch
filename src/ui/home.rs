@@ -3,10 +3,9 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use std::time::SystemTime;
 
 use crate::app::{App, HomeFocusTarget};
-use crate::ui::components::truncate;
+use crate::ui::components::{format_duration, format_step};
 use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -24,27 +23,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(7),
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
+            Constraint::Min(12),
+            Constraint::Length(process_panel_height(app)),
         ])
         .split(left_col);
 
     let right_col_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(8),
-            Constraint::Percentage(60),
-        ])
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
         .split(right_col);
 
     let overview_area = left_col_chunks[0];
     let runs_area = left_col_chunks[1];
     let processes_area = left_col_chunks[2];
 
-    let files_area = right_col_chunks[0];
-    let system_area = right_col_chunks[1];
-    let alerts_area = right_col_chunks[2];
+    let system_area = right_col_chunks[0];
+    let alerts_area = right_col_chunks[1];
 
     let focus = &app.ui_state.monitoring.home_focus;
 
@@ -68,13 +62,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         &palette,
         *focus == HomeFocusTarget::Processes,
     );
-    render_files(
-        frame,
-        files_area,
-        app,
-        &palette,
-        *focus == HomeFocusTarget::Files,
-    );
     crate::ui::system_processes::render_resource_strip(frame, system_area, app, &palette);
     render_alerts(
         frame,
@@ -92,13 +79,13 @@ fn render_overview(
     palette: &crate::ui::theme::ThemePalette,
     is_focused: bool,
 ) {
-    let has_active = app.training.latest.is_some();
-
-    let title = if has_active {
-        "▶  Active Run"
-    } else {
-        "○  No Active Run"
+    let run_state_title = match app.training_data_health_state() {
+        crate::app::DataHealthState::Live => "Current Run",
+        crate::app::DataHealthState::Stale => "Latest Run Snapshot",
+        crate::app::DataHealthState::NoData => "No Live Run",
     };
+
+    let title = format!("[1] {run_state_title}");
 
     let mut border_style = Style::default();
     let mut title_style = Style::default();
@@ -106,7 +93,7 @@ fn render_overview(
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
         title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-    } else if has_active {
+    } else if app.training.latest.is_some() {
         border_style = border_style.fg(palette.success);
         title_style = title_style.fg(palette.header_fg);
     } else {
@@ -134,12 +121,21 @@ fn render_overview(
             .learning_rate
             .map(|v| format!("{:.2e}", v))
             .unwrap_or_else(|| "N/A".to_string());
+        let run_duration = app
+            .selected_run_elapsed()
+            .map(format_duration)
+            .unwrap_or_else(|| "N/A".to_string());
+        let active_runs = app.active_run_count();
 
         let content = vec![
             Line::from(format!("Step: {:<8} Loss: {:<8} LR: {}", step, loss, lr)),
+            Line::from(format!(
+                "Run time: {:<8} Active runs: {}",
+                run_duration, active_runs
+            )),
             Line::from(Span::styled(
                 if is_focused {
-                    "[Press Enter to view Live Metrics]"
+                    "[Press Enter to view the current run]"
                 } else {
                     ""
                 },
@@ -152,69 +148,13 @@ fn render_overview(
             .style(Style::default().fg(palette.header_fg));
         frame.render_widget(paragraph, area);
     } else {
-        let paragraph = Paragraph::new("No metrics received yet")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
+        let paragraph =
+            Paragraph::new("No metrics received yet. Focus Runs to browse stored runs.")
+                .block(block)
+                .style(Style::default().fg(palette.muted))
+                .alignment(Alignment::Center);
         frame.render_widget(paragraph, area);
     }
-}
-
-fn render_files(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-    is_focused: bool,
-) {
-    let count = app.discovered_files.len();
-    let title = format!("📁  Active Files ({})", count);
-
-    let mut title_style = Style::default();
-    let mut border_style = Style::default();
-
-    if is_focused {
-        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-    } else if count > 0 {
-        border_style = border_style.fg(palette.accent);
-        title_style = title_style.fg(palette.header_fg);
-    } else {
-        border_style = border_style.fg(palette.muted);
-        title_style = title_style.fg(palette.header_fg);
-    }
-
-    let block = Block::default()
-        .title(title)
-        .title_style(title_style)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    if count == 0 {
-        let paragraph = Paragraph::new("No training files detected")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let mut lines = Vec::new();
-    for f in app.discovered_files.iter().take(8) {
-        let filename = f.path.file_name().unwrap_or_default().to_string_lossy();
-        let name = truncate(&filename, 30);
-        let age = elapsed_pretty(f.modified);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<30} ", name),
-                Style::default().fg(palette.header_fg),
-            ),
-            Span::styled(age, Style::default().fg(palette.muted)),
-        ]));
-    }
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
 }
 
 fn render_alerts(
@@ -236,7 +176,7 @@ fn render_alerts(
     }
 
     let block = Block::default()
-        .title("Alerts")
+        .title("[4] Alerts")
         .title_style(title_style)
         .borders(Borders::ALL)
         .border_style(border_style);
@@ -284,38 +224,13 @@ fn render_alerts(
     frame.render_widget(paragraph, area);
 }
 
-fn elapsed_pretty(modified: SystemTime) -> String {
-    let duration = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default()
-        .as_secs();
-    if duration < 60 {
-        format!("{}s ago", duration)
-    } else if duration < 3600 {
-        format!("{}m ago", duration / 60)
-    } else {
-        format!("{}h ago", duration / 3600)
+fn process_panel_height(app: &App) -> u16 {
+    if app.discovered_processes.is_empty() {
+        return 5;
     }
-}
 
-fn format_step(step: u64) -> String {
-    if step < 10000 {
-        let s = step.to_string();
-        let bytes = s.as_bytes();
-        let mut result = String::new();
-
-        for (count, &b) in bytes.iter().rev().enumerate() {
-            if count > 0 && count % 3 == 0 {
-                result.push(',');
-            }
-            result.push(b as char);
-        }
-        result.chars().rev().collect()
-    } else if step < 1_000_000 {
-        format!("{:.1}k", step as f64 / 1000.0)
-    } else {
-        format!("{:.1}m", step as f64 / 1_000_000.0)
-    }
+    let visible_rows = app.discovered_processes.len().min(6) as u16;
+    (visible_rows + 3).min(10)
 }
 
 #[cfg(test)]

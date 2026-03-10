@@ -28,7 +28,9 @@ fn app_state_routes_between_home_and_run_detail() {
     assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
     assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+    app.ui_state.explorer.records = vec![sample_run("run-42", RunStatus::Active)];
+    app.ui_state.monitoring.run_detail.selected_run_id = Some("run-42".to_string());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 }
@@ -59,9 +61,6 @@ fn home_tab_cycles_panels_not_routes() {
     );
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Files);
-
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Alerts);
     assert_eq!(app.ui_state.monitoring.focused_panel, None);
 
@@ -80,12 +79,11 @@ fn home_view_renders_required_sections() {
     use epoch::home::service::home_sections;
     let sections = home_sections();
     for required in [
-        "Active Runs",
-        "Recent Runs",
-        "Recent Projects",
-        "Alerts Needing Attention",
-        "Available Checkpoints",
-        "Discovered Processes",
+        "Current Run",
+        "Runs",
+        "Processes",
+        "System Summary",
+        "Alerts",
     ] {
         assert!(sections.contains(&required), "missing section: {required}");
     }
@@ -193,6 +191,7 @@ fn home_runs_support_search_and_filter_interactions() {
 #[test]
 fn home_workspace_attach_process_opens_run_detail() {
     let mut app = App::new(Config::default());
+    app.set_store(epoch::store::repository::RunStore::open_in_memory().expect("store"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
     app.ui_state.monitoring.home_focus = HomeFocusTarget::Processes;
@@ -206,10 +205,33 @@ fn home_workspace_attach_process_opens_run_detail() {
         pid_reused: false,
     }]);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
     assert_eq!(app.ui_state.monitoring.selected_pid, Some(4242));
+    assert!(app.ui_state.monitoring.run_detail.selected_run_id.is_some());
+}
+
+#[test]
+fn home_workspace_permission_denied_process_does_not_open_run_detail() {
+    let mut app = App::new(Config::default());
+    app.set_store(epoch::store::repository::RunStore::open_in_memory().expect("store"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.ui_state.monitoring.focused_panel = Some(PanelFocus::Processes);
+    app.ui_state.monitoring.home_focus = HomeFocusTarget::Processes;
+    app.set_discovered_processes(vec![ProcessCandidate {
+        pid: 9001,
+        command: "python train.py".to_string(),
+        cwd: Some("/tmp/proj".to_string()),
+        cpu_milli_percent: 100,
+        memory_bytes: 1024,
+        status: ProbeStatus::PermissionDenied,
+        pid_reused: false,
+    }]);
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
+    assert!(app.ui_state.monitoring.run_detail.selected_run_id.is_none());
 }
 
 #[test]
@@ -249,11 +271,11 @@ fn render_buffer_home_workspace_shows_header_and_shell_hints() {
     let content = buffer_to_string(terminal.backend().buffer());
 
     assert!(content.contains("Home"));
-    assert!(content.contains("No Active Run"));
+    assert!(content.contains("No Live Run"));
     assert!(content.contains("Runs"));
     assert!(content.contains("Alerts"));
-    assert!(content.contains("Tab:focus panel"));
-    assert!(content.contains("o:open  a:attach  e:detail"));
+    assert!(content.contains("1-4:focus panel"));
+    assert!(content.contains("r:refresh runs"));
     assert!(content.contains("?:help"));
 }
 
@@ -279,7 +301,7 @@ fn render_buffer_run_detail_shows_breadcrumb_live_content_and_hints() {
     assert!(content.contains("Esc:back"));
     assert!(content.contains("Run Detail: run-42"));
     assert!(content.contains("Loss:"));
-    assert!(content.contains("1-4:box"));
+    assert!(content.contains("1-4:graph"));
 }
 
 fn sample_run(run_id: &str, status: RunStatus) -> RunRecord {

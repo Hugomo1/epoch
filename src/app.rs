@@ -118,7 +118,6 @@ pub enum PanelFocus {
     Overview,
     Runs,
     Processes,
-    Files,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,41 +125,26 @@ pub struct MonitoringRouteMetadata {
     pub route_label: &'static str,
     pub breadcrumb: Option<&'static str>,
     pub back_hint: Option<&'static str>,
-    pub drill_hint: Option<&'static str>,
-    pub focus_hint: &'static str,
-    pub panel_hints: &'static str,
     pub search_hints: Option<&'static str>,
 }
 
 impl MonitoringRoute {
     pub fn metadata(self, focused_panel: Option<PanelFocus>) -> MonitoringRouteMetadata {
         match self {
-            Self::Home => {
-                let panel_hints = match focused_panel.unwrap_or(PanelFocus::Overview) {
-                    PanelFocus::Runs => "j/k:select  /:search  f:filter  Enter:open  r:refresh",
-                    PanelFocus::Processes => "j/k:select  a:attach  r:refresh",
-                    PanelFocus::Overview | PanelFocus::Files => {
-                        "o:open  a:attach  e:detail  s:scan  r:refresh"
-                    }
-                };
-
-                MonitoringRouteMetadata {
-                    route_label: "Home",
-                    breadcrumb: None,
-                    back_hint: None,
-                    drill_hint: Some("Enter:open focused"),
-                    focus_hint: "Tab:focus panel",
-                    panel_hints,
-                    search_hints: Some("Type:search  Enter:confirm  Esc:cancel"),
-                }
-            }
+            Self::Home => MonitoringRouteMetadata {
+                route_label: match focused_panel.unwrap_or(PanelFocus::Overview) {
+                    PanelFocus::Overview => "Home",
+                    PanelFocus::Runs => "Home > Runs",
+                    PanelFocus::Processes => "Home > Processes",
+                },
+                breadcrumb: None,
+                back_hint: None,
+                search_hints: Some("Type:search  Backspace:erase  Enter:apply  Esc:close"),
+            },
             Self::RunDetail => MonitoringRouteMetadata {
                 route_label: "Run Detail",
                 breadcrumb: Some("Home > Run Detail"),
                 back_hint: Some("Esc:back"),
-                drill_hint: None,
-                focus_hint: "Tab:focus graph",
-                panel_hints: "1-4:box  -/=:zoom  Left/Right:pan  j/k:focus",
                 search_hints: None,
             },
         }
@@ -173,18 +157,39 @@ pub enum HomeFocusTarget {
     Overview,
     Runs,
     Processes,
-    Files,
     Alerts,
 }
 
 impl HomeFocusTarget {
-    const ORDER: [Self; 5] = [
-        Self::Overview,
-        Self::Runs,
-        Self::Processes,
-        Self::Files,
-        Self::Alerts,
-    ];
+    const ORDER: [Self; 4] = [Self::Overview, Self::Runs, Self::Processes, Self::Alerts];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Runs => "Runs",
+            Self::Processes => "Processes",
+            Self::Alerts => "Alerts",
+        }
+    }
+
+    fn to_box_index(self) -> u8 {
+        match self {
+            Self::Overview => 1,
+            Self::Runs => 2,
+            Self::Processes => 3,
+            Self::Alerts => 4,
+        }
+    }
+
+    fn from_box_index(index: u8) -> Self {
+        match index {
+            1 => Self::Overview,
+            2 => Self::Runs,
+            3 => Self::Processes,
+            4 => Self::Alerts,
+            _ => Self::Overview,
+        }
+    }
 
     fn next(self) -> Self {
         let idx = Self::ORDER
@@ -212,7 +217,6 @@ impl HomeFocusTarget {
             Self::Overview => Some(PanelFocus::Overview),
             Self::Runs => Some(PanelFocus::Runs),
             Self::Processes => Some(PanelFocus::Processes),
-            Self::Files => Some(PanelFocus::Files),
             Self::Alerts => None,
         }
     }
@@ -222,7 +226,6 @@ impl HomeFocusTarget {
             Some(PanelFocus::Overview) => Self::Overview,
             Some(PanelFocus::Runs) => Self::Runs,
             Some(PanelFocus::Processes) => Self::Processes,
-            Some(PanelFocus::Files) => Self::Files,
             None => Self::Alerts,
         }
     }
@@ -273,6 +276,15 @@ impl RunDetailFocusTarget {
             Self::Eval => 2,
             Self::LearningRate => 3,
             Self::GradNorm => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Core => "Core",
+            Self::Eval => "Eval",
+            Self::LearningRate => "Learning Rate",
+            Self::GradNorm => "Grad Norm",
         }
     }
 
@@ -636,9 +648,9 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
         ("q / Ctrl+C".to_string(), "Quit".to_string()),
         (
             "Tab / Shift+Tab".to_string(),
-            "Cycle Home panel focus".to_string(),
+            "Cycle focused panel or graph".to_string(),
         ),
-        ("1-4".to_string(), "Focus graph".to_string()),
+        ("1-4".to_string(), "Focus Home panel or graph".to_string()),
         ("Space".to_string(), "Toggle live/pause".to_string()),
         (
             "Left/Right".to_string(),
@@ -656,44 +668,34 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
     let run_detail_meta = MonitoringRoute::RunDetail.metadata(None);
 
     entries.push((
-        format!(
-            "{}: {}",
-            home_overview_meta.route_label, home_overview_meta.focus_hint
-        ),
-        "Cycle home focus targets".to_string(),
+        home_overview_meta.route_label.to_string(),
+        "Enter:view current run  r:refresh runs".to_string(),
     ));
     entries.push((
-        "Home route".to_string(),
-        home_overview_meta.panel_hints.to_string(),
+        home_runs_meta.route_label.to_string(),
+        "Up/Down:select  /:search  f:filter  Enter:view run  r:refresh".to_string(),
     ));
     entries.push((
-        "Home > Runs".to_string(),
-        home_runs_meta.panel_hints.to_string(),
-    ));
-    entries.push((
-        "Home > Runs (search)".to_string(),
+        format!("{} (search)", home_runs_meta.route_label),
         home_runs_meta.search_hints.unwrap_or_default().to_string(),
     ));
     entries.push((
-        "Home > Processes".to_string(),
-        home_processes_meta.panel_hints.to_string(),
+        home_processes_meta.route_label.to_string(),
+        "Up/Down:select  Enter:attach process  r:refresh".to_string(),
     ));
     entries.push((
         run_detail_meta
             .breadcrumb
             .unwrap_or(run_detail_meta.route_label)
             .to_string(),
-        format!(
-            "{}  {}",
-            run_detail_meta.back_hint.unwrap_or_default(),
-            run_detail_meta.panel_hints
-        )
-        .trim()
-        .to_string(),
+        "1-4:graph  Up/Down:focus  -/=:zoom  Left/Right:pan".to_string(),
     ));
 
     if profile == "vim" {
-        entries.push(("j/k".to_string(), "Move focus (vim)".to_string()));
+        entries.push((
+            "j/k".to_string(),
+            "Move list or graph focus (vim)".to_string(),
+        ));
         entries.push(("h/l".to_string(), "Pan history (vim)".to_string()));
         entries.push((
             "Picker (vim): i".to_string(),
@@ -785,6 +787,7 @@ pub struct App {
 impl App {
     const VIEWPORT_PAN_STEP: usize = 10;
     const VIEWPORT_MAX_ZOOM_LEVEL: u8 = 6;
+    const STORE_REFRESH_INTERVAL_TICKS: u64 = 4;
 
     pub fn new(config: Config) -> Self {
         let capacity = config.history_size;
@@ -958,6 +961,40 @@ impl App {
         &mut self,
         processes: Vec<crate::collectors::process::ProcessCandidate>,
     ) {
+        if let Some(store) = &self.run_store {
+            let active_process_runs = store
+                .list_runs(
+                    Some(crate::store::types::RunStatus::Active.as_str()),
+                    None,
+                    200,
+                )
+                .unwrap_or_default();
+            let active_pids = processes
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>();
+
+            for run in active_process_runs.into_iter().filter(|run| {
+                matches!(run.source_kind, crate::store::types::RunSourceKind::Process)
+            }) {
+                let Some(source_locator) = run.source_locator.as_deref() else {
+                    continue;
+                };
+                let Some(pid_text) = source_locator.strip_prefix("pid:") else {
+                    continue;
+                };
+                let Some(pid) = pid_text.parse::<u32>().ok() else {
+                    continue;
+                };
+                if !active_pids.contains(&pid) {
+                    let _ =
+                        store.complete_run(&run.run_id, crate::store::types::RunStatus::Completed);
+                }
+            }
+            self.load_recent_runs();
+            self.refresh_explorer_records();
+        }
+
         let prev_idx = self.ui_state.selected_process_idx;
         let focused_pid = self.ui_state.monitoring.selected_pid.or_else(|| {
             self.discovered_processes
@@ -1076,11 +1113,21 @@ impl App {
                 .project_root
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string());
-            let _ = crate::home::service::attach_to_discovered_process(
+            match crate::home::service::attach_to_discovered_process(
                 store,
                 candidate,
                 project_root_str.as_deref(),
-            );
+            ) {
+                Ok(crate::home::service::AttachOutcome::Attached { run_id, .. }) => {
+                    self.ui_state.monitoring.run_detail.selected_run_id = Some(run_id);
+                    self.load_recent_runs();
+                    self.refresh_explorer_records();
+                }
+                Ok(crate::home::service::AttachOutcome::PermissionDenied) | Err(_) => {
+                    self.sync_focused_process_from_index();
+                    return;
+                }
+            }
         }
         self.ui_state.monitoring.selected_pid = Some(candidate.pid);
         self.update_home_focus_target(self.current_home_focus_target());
@@ -1119,6 +1166,162 @@ impl App {
         } else {
             self.ui_state.monitoring.home_focus
         }
+    }
+
+    pub fn is_vim_keymap(&self) -> bool {
+        self.config.keymap_profile == "vim"
+    }
+
+    pub fn home_focus_index(&self) -> u8 {
+        self.current_home_focus_target().to_box_index()
+    }
+
+    pub fn home_focus_label(&self) -> &'static str {
+        self.current_home_focus_target().label()
+    }
+
+    pub fn run_detail_focus_label(&self) -> &'static str {
+        self.ui_state.monitoring.run_detail_focus.label()
+    }
+
+    pub fn active_run_count(&self) -> usize {
+        self.ui_state
+            .explorer
+            .records
+            .iter()
+            .filter(|record| matches!(record.status, crate::store::types::RunStatus::Active))
+            .count()
+    }
+
+    pub fn selected_run_record(&self) -> Option<&crate::store::types::RunRecord> {
+        let selected_run_id = self
+            .ui_state
+            .monitoring
+            .run_detail
+            .selected_run_id
+            .as_deref()
+            .or_else(|| {
+                self.selected_run_index()
+                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
+                    .map(|record| record.run_id.as_str())
+            });
+
+        selected_run_id.and_then(|run_id| {
+            self.ui_state
+                .explorer
+                .records
+                .iter()
+                .find(|record| record.run_id == run_id)
+                .or_else(|| {
+                    self.recent_runs
+                        .iter()
+                        .find(|record| record.run_id == run_id)
+                })
+        })
+    }
+
+    pub fn selected_run_elapsed(&self) -> Option<Duration> {
+        if let Some(start_time) = self.training.start_time {
+            return Some(start_time.elapsed());
+        }
+
+        let record = self.selected_run_record()?;
+        let started = u64::try_from(record.started_at_epoch_secs).ok()?;
+        let ended = record
+            .ended_at_epoch_secs
+            .and_then(|secs| u64::try_from(secs).ok())
+            .unwrap_or_else(|| crate::store::types::now_epoch_secs() as u64);
+        Some(Duration::from_secs(ended.saturating_sub(started)))
+    }
+
+    pub fn current_run_step(&self) -> Option<u64> {
+        self.training
+            .latest
+            .as_ref()
+            .and_then(|metrics| metrics.step)
+            .or_else(|| {
+                self.selected_run_record()
+                    .and_then(|record| record.last_step)
+            })
+    }
+
+    pub fn active_panel_commands(&self) -> String {
+        if matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+            && self.ui_state.explorer.search_active
+        {
+            return self
+                .ui_state
+                .monitoring
+                .route
+                .metadata(self.ui_state.monitoring.focused_panel)
+                .search_hints
+                .unwrap_or("Type:search  Backspace:erase  Enter:apply  Esc:close")
+                .to_string();
+        }
+
+        match self.ui_state.monitoring.route {
+            MonitoringRoute::Home => match self.current_home_focus_target() {
+                HomeFocusTarget::Overview => {
+                    if self.selected_run_record().is_some() {
+                        "Enter:view current run  r:refresh runs".to_string()
+                    } else {
+                        "r:refresh runs".to_string()
+                    }
+                }
+                HomeFocusTarget::Runs => {
+                    let select_hint = if self.is_vim_keymap() {
+                        "Up/Down/j/k:select"
+                    } else {
+                        "Up/Down:select"
+                    };
+                    format!("{select_hint}  /:search  f:filter  Enter:view run  r:refresh")
+                }
+                HomeFocusTarget::Processes => {
+                    let select_hint = if self.is_vim_keymap() {
+                        "Up/Down/j/k:select"
+                    } else {
+                        "Up/Down:select"
+                    };
+                    format!("{select_hint}  Enter:attach process  r:refresh")
+                }
+                HomeFocusTarget::Alerts => "r:refresh alerts".to_string(),
+            },
+            MonitoringRoute::RunDetail => {
+                let focus_hint = if self.is_vim_keymap() {
+                    "Up/Down/j/k:focus"
+                } else {
+                    "Up/Down:focus"
+                };
+                let pan_hint = if self.is_vim_keymap() {
+                    "Left/Right/h/l:pan"
+                } else {
+                    "Left/Right:pan"
+                };
+                format!("1-4:graph  {focus_hint}  -/=:zoom  {pan_hint}")
+            }
+        }
+    }
+
+    pub fn monitoring_global_commands(&self) -> String {
+        let mut parts = Vec::new();
+
+        match self.ui_state.monitoring.route {
+            MonitoringRoute::Home => {
+                parts.push("1-4:focus panel");
+                parts.push("Tab/Shift+Tab:cycle");
+            }
+            MonitoringRoute::RunDetail => {
+                parts.push("Esc:back");
+                parts.push("Tab/Shift+Tab:cycle");
+                parts.push("Space:pause");
+                parts.push("g:reset");
+            }
+        }
+
+        parts.push("?:help");
+        parts.push("s:settings");
+        parts.push("q:quit");
+        parts.join("  ")
     }
 
     fn set_run_detail_focus_target(&mut self, focus: RunDetailFocusTarget) {
@@ -1266,15 +1469,28 @@ impl App {
             Cancel,
         }
 
+        let settings_is_vim = self.is_vim_keymap();
         let settings_action = if let AppMode::Settings(state) = &mut self.ui_state.mode {
             let mut action = None;
             match (key.code, key.modifiers) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => state.move_up(),
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => state.move_down(),
-                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE)
+                    if matches!(key.code, KeyCode::Up) || settings_is_vim =>
+                {
+                    state.move_up()
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE)
+                    if matches!(key.code, KeyCode::Down) || settings_is_vim =>
+                {
+                    state.move_down()
+                }
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE)
+                    if matches!(key.code, KeyCode::Left) || settings_is_vim =>
+                {
                     state.cycle_current(-1)
                 }
-                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE)
+                    if matches!(key.code, KeyCode::Right) || settings_is_vim =>
+                {
                     state.cycle_current(1)
                 }
                 (KeyCode::Char('a'), KeyModifiers::NONE) => action = Some(SettingsAction::Apply),
@@ -1460,6 +1676,10 @@ impl App {
     fn handle_key_monitoring_route(&mut self, key: KeyEvent) -> bool {
         match self.ui_state.monitoring.route {
             MonitoringRoute::Home => match (key.code, key.modifiers) {
+                (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
+                    self.update_home_focus_target(HomeFocusTarget::from_box_index(c as u8 - b'0'));
+                    true
+                }
                 (KeyCode::Tab, _) => {
                     self.cycle_home_panel(true);
                     true
@@ -1494,6 +1714,21 @@ impl App {
         self.update_home_focus_target(focus_target);
 
         match focus_target {
+            HomeFocusTarget::Overview => {
+                self.refresh_explorer_records();
+                self.sync_focused_run_from_index();
+                if self
+                    .ui_state
+                    .monitoring
+                    .run_detail
+                    .selected_run_id
+                    .is_some()
+                {
+                    self.set_monitoring_route(MonitoringRoute::RunDetail);
+                    return true;
+                }
+                false
+            }
             HomeFocusTarget::Runs => {
                 self.sync_focused_run_from_index();
                 if let Some(record) = self
@@ -1517,7 +1752,7 @@ impl App {
                 }
                 true
             }
-            _ => false,
+            HomeFocusTarget::Alerts => false,
         }
     }
 
@@ -1587,47 +1822,16 @@ impl App {
             MonitoringRoute::Home => match self.current_home_focus_target() {
                 HomeFocusTarget::Runs => self.handle_key_run_explorer(key),
                 HomeFocusTarget::Processes => self.handle_key_system_processes(key),
-                HomeFocusTarget::Overview | HomeFocusTarget::Files => {
-                    self.handle_key_home_workspace(key)
-                }
+                HomeFocusTarget::Overview => self.handle_key_home_workspace(key),
                 HomeFocusTarget::Alerts => self.handle_key_home_alerts(key),
             },
         }
     }
 
     fn handle_key_home_workspace(&mut self, key: KeyEvent) {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('o'), KeyModifiers::NONE) => {
-                self.ui_state.mode = AppMode::Scanning;
-            }
-            (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                self.refresh_explorer_records();
-                self.sync_focused_run_from_index();
-                if let Some(record) = self
-                    .selected_run_index()
-                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
-                {
-                    self.ui_state.monitoring.run_detail.selected_run_id =
-                        Some(record.run_id.clone());
-                }
-                self.update_home_focus_target(self.current_home_focus_target());
-                self.set_monitoring_route(MonitoringRoute::RunDetail);
-            }
-            (KeyCode::Char('a'), KeyModifiers::NONE) => {
-                if let Some(candidate) = self
-                    .selected_process_index()
-                    .and_then(|idx| self.discovered_processes.get(idx))
-                    .or_else(|| self.discovered_processes.first())
-                    .cloned()
-                {
-                    self.attach_process_and_switch(&candidate);
-                }
-            }
-            (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                self.load_recent_runs();
-                self.refresh_explorer_records();
-            }
-            _ => {}
+        if let (KeyCode::Char('r'), KeyModifiers::NONE) = (key.code, key.modifiers) {
+            self.load_recent_runs();
+            self.refresh_explorer_records();
         }
     }
 
@@ -1638,6 +1842,8 @@ impl App {
     }
 
     fn handle_key_run_explorer(&mut self, key: KeyEvent) {
+        let is_vim = self.is_vim_keymap();
+
         if self.ui_state.explorer.search_active {
             match key.code {
                 KeyCode::Esc => {
@@ -1661,13 +1867,17 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _)
+                if matches!(key.code, KeyCode::Down) || is_vim =>
+            {
                 let max = self.ui_state.explorer.records.len().saturating_sub(1);
                 self.ui_state.explorer.selected_idx =
                     (self.ui_state.explorer.selected_idx + 1).min(max);
                 self.sync_focused_run_from_index();
             }
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _)
+                if matches!(key.code, KeyCode::Up) || is_vim =>
+            {
                 self.ui_state.explorer.selected_idx =
                     self.ui_state.explorer.selected_idx.saturating_sub(1);
                 self.sync_focused_run_from_index();
@@ -1742,6 +1952,11 @@ impl App {
             if last_data.elapsed() > Duration::from_secs(self.config.stale_after_secs) {
                 self.training.input_active = false;
             }
+        }
+
+        if self.alerts.tick % Self::STORE_REFRESH_INTERVAL_TICKS == 0 {
+            self.load_recent_runs();
+            self.refresh_explorer_records();
         }
 
         self.evaluate_alerts();
@@ -4208,7 +4423,8 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(key, desc)| key == "Tab / Shift+Tab" && desc == "Cycle Home panel focus")
+                .any(|(key, desc)| key == "Tab / Shift+Tab"
+                    && desc == "Cycle focused panel or graph")
         );
     }
 
@@ -4269,19 +4485,42 @@ mod tests {
     }
 
     #[test]
-    fn test_home_key_e_switches_to_run_explorer() {
+    fn test_home_overview_enter_opens_selected_run_detail() {
         let mut app = App::new(Config::default());
         app.ui_state.monitoring.route = MonitoringRoute::Home;
-        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.ui_state.explorer.records = vec![crate::store::types::RunRecord {
+            run_id: "run-1".to_string(),
+            source_fingerprint: "fp-1".to_string(),
+            source_kind: crate::store::types::RunSourceKind::LogFile,
+            source_locator: Some("run-1.log".to_string()),
+            project_root: None,
+            display_name: Some("run-1".to_string()),
+            status: crate::store::types::RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 1,
+            ended_at_epoch_secs: None,
+            last_step: Some(5),
+            last_updated_epoch_secs: 1,
+        }];
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     }
 
     #[test]
-    fn test_home_key_o_enters_scanning_mode() {
+    fn test_home_numeric_shortcuts_focus_panels() {
         let mut app = App::new(Config::default());
         app.ui_state.monitoring.route = MonitoringRoute::Home;
-        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.mode, AppMode::Scanning);
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(
+            app.ui_state.monitoring.home_focus,
+            HomeFocusTarget::Processes
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Alerts);
     }
 
     #[test]
@@ -4329,9 +4568,13 @@ mod tests {
 
     #[test]
     fn test_explorer_j_moves_cursor() {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
         app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+        app.ui_state.monitoring.home_focus = HomeFocusTarget::Runs;
 
         use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
         let dummy_record = RunRecord {
@@ -4381,9 +4624,13 @@ mod tests {
 
     #[test]
     fn test_explorer_k_moves_cursor_up() {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config {
+            keymap_profile: "vim".to_string(),
+            ..Config::default()
+        });
         app.ui_state.monitoring.route = MonitoringRoute::Home;
         app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+        app.ui_state.monitoring.home_focus = HomeFocusTarget::Runs;
 
         use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
         let dummy = RunRecord {
@@ -4600,7 +4847,7 @@ mod tests {
     #[test]
     fn test_keymap_entries_contains_new_bindings() {
         let entries = keymap_entries("default");
-        assert!(entries.iter().any(|(k, _)| k == "Home route"));
+        assert!(entries.iter().any(|(k, _)| k == "Home"));
         assert!(entries.iter().any(|(k, _)| k == "Home > Runs"));
         assert!(entries.iter().any(|(k, _)| k == "Home > Processes"));
     }

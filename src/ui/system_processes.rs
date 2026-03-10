@@ -123,9 +123,9 @@ pub fn render_processes_table(
 ) {
     let count = app.discovered_processes.len();
     let title = if count > 0 {
-        format!(" ⚡ Processes ({}) ", count)
+        format!("[3] Processes ({count})")
     } else {
-        " ⚡ Processes ".to_string()
+        "[3] Processes".to_string()
     };
 
     let mut border_style = Style::default();
@@ -150,7 +150,7 @@ pub fn render_processes_table(
 
     if count == 0 {
         let p = Paragraph::new(
-            "No training processes detected.\nEpoch monitors Python training processes automatically.",
+            "No training processes detected.\nWhen this panel is empty it collapses so Runs can use the space.",
         )
         .block(block)
         .style(Style::default().fg(palette.muted))

@@ -135,7 +135,8 @@ async fn main() -> Result<()> {
                     },
                 );
                 if let Ok(result) = attach {
-                    active_run_id = Some(result.run_id);
+                    active_run_id = Some(result.run_id.clone());
+                    app.ui_state.monitoring.run_detail.selected_run_id = Some(result.run_id);
                 }
             }
         } else if let Some(path) = config.log_file.as_ref()
@@ -172,7 +173,8 @@ async fn main() -> Result<()> {
                 },
             );
             if let Ok(result) = attach {
-                active_run_id = Some(result.run_id);
+                active_run_id = Some(result.run_id.clone());
+                app.ui_state.monitoring.run_detail.selected_run_id = Some(result.run_id);
             }
         }
 

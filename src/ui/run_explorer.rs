@@ -15,6 +15,11 @@ pub fn render_runs_panel(frame: &mut Frame, area: Rect, app: &App, is_focused: b
 
     let mut title_style = Style::default();
     let mut border_style = Style::default();
+    let active_count = state
+        .records
+        .iter()
+        .filter(|record| matches!(record.status, RunStatus::Active))
+        .count();
 
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
@@ -25,7 +30,11 @@ pub fn render_runs_panel(frame: &mut Frame, area: Rect, app: &App, is_focused: b
     }
 
     let block = Block::default()
-        .title("Runs")
+        .title(format!(
+            "[2] Runs ({}, {} active)",
+            state.records.len(),
+            active_count
+        ))
         .title_style(title_style)
         .borders(Borders::ALL)
         .border_style(border_style);
@@ -198,7 +207,7 @@ fn render_detail_strip(
         let p = Paragraph::new(text).style(Style::default().fg(palette.muted));
         frame.render_widget(p, area);
     } else {
-        let text = "  /: search   f: filter status   Enter: open active run";
+        let text = "  /: search   f: filter status   Enter: view selected run";
         let p = Paragraph::new(text).style(Style::default().fg(palette.muted));
         frame.render_widget(p, area);
     }
