@@ -108,41 +108,41 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
 
     let (box_cmds, tab_cmds, global_cmds) = match &app.ui_state.mode {
         AppMode::Monitoring => {
-            let box_level = match app.ui_state.monitoring.route {
+            let route = app.ui_state.monitoring.route;
+            let focused_panel = app.ui_state.monitoring.focused_panel;
+            let metadata = route.metadata(focused_panel);
+            let box_level = match route {
                 MonitoringRoute::RunDetail => {
-                    format!(
-                        "[{}] -/=:zoom Left/Right:pan j/k:focus",
-                        app.ui_state.focused_box
-                    )
+                    format!("[{}] {}", app.ui_state.focused_box, metadata.panel_hints)
                 }
-                MonitoringRoute::Home => match app.ui_state.monitoring.focused_panel {
-                    Some(panel) => format!("Home panel: {panel:?}"),
-                    None => String::new(),
-                },
+                MonitoringRoute::Home => metadata.focus_hint.to_string(),
             };
-            let tab_level = match app.ui_state.monitoring.route {
-                MonitoringRoute::RunDetail => "1-4:box".to_string(),
-                MonitoringRoute::Home => match app
-                    .ui_state
-                    .monitoring
-                    .focused_panel
-                    .unwrap_or(PanelFocus::Overview)
-                {
-                    PanelFocus::Runs => {
-                        if app.ui_state.explorer.search_active {
-                            "Type:search  Enter:confirm  Esc:cancel".to_string()
-                        } else {
-                            "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
-                        }
-                    }
-                    PanelFocus::Processes => "j/k:select  a:attach  r:refresh".to_string(),
-                    PanelFocus::Overview | PanelFocus::Files => {
-                        "o:open  a:attach  e:detail  s:scan  r:refresh".to_string()
-                    }
-                },
+            let tab_level = if matches!(route, MonitoringRoute::Home)
+                && matches!(focused_panel, Some(PanelFocus::Runs))
+                && app.ui_state.explorer.search_active
+            {
+                metadata
+                    .search_hints
+                    .unwrap_or(metadata.panel_hints)
+                    .to_string()
+            } else {
+                metadata.panel_hints.to_string()
             };
-            let global_level =
-                "?:help s:settings Tab:panels Space:pause g:reset q:quit ".to_string();
+
+            let mut global_parts = Vec::new();
+            if let Some(back_hint) = metadata.back_hint {
+                global_parts.push(back_hint);
+            }
+            if let Some(drill_hint) = metadata.drill_hint {
+                global_parts.push(drill_hint);
+            }
+            global_parts.push("?:help");
+            global_parts.push("s:settings");
+            global_parts.push("Tab:panels");
+            global_parts.push("Space:pause");
+            global_parts.push("g:reset");
+            global_parts.push("q:quit");
+            let global_level = global_parts.join(" ");
             (box_level, tab_level, global_level)
         }
         AppMode::Settings(_) => (
@@ -196,28 +196,25 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
 }
 
 pub fn active_commands_for_view(app: &App) -> String {
-    match app.ui_state.monitoring.route {
+    let route = app.ui_state.monitoring.route;
+    let focused_panel = app.ui_state.monitoring.focused_panel;
+    let metadata = route.metadata(focused_panel);
+
+    if matches!(route, MonitoringRoute::Home)
+        && matches!(focused_panel, Some(PanelFocus::Runs))
+        && app.ui_state.explorer.search_active
+    {
+        return metadata
+            .search_hints
+            .unwrap_or(metadata.panel_hints)
+            .to_string();
+    }
+
+    match route {
         MonitoringRoute::RunDetail => {
-            format!("[{}] -/=:zoom Left/Right:pan", app.ui_state.focused_box)
+            format!("[{}] {}", app.ui_state.focused_box, metadata.panel_hints)
         }
-        MonitoringRoute::Home => match app
-            .ui_state
-            .monitoring
-            .focused_panel
-            .unwrap_or(PanelFocus::Overview)
-        {
-            PanelFocus::Runs => {
-                if app.ui_state.explorer.search_active {
-                    "Type:search  Enter:confirm  Esc:cancel".to_string()
-                } else {
-                    "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
-                }
-            }
-            PanelFocus::Processes => "j/k:select  a:attach  r:refresh".to_string(),
-            PanelFocus::Overview | PanelFocus::Files => {
-                "o:open  a:attach  e:detail  s:scan  r:refresh".to_string()
-            }
-        },
+        MonitoringRoute::Home => metadata.panel_hints.to_string(),
     }
 }
 
@@ -404,7 +401,7 @@ mod tests {
 
         assert!(content.contains("o:open"));
         assert!(content.contains("a:attach"));
-        assert!(content.contains("e:explore"));
+        assert!(content.contains("e:detail"));
         assert!(content.contains("s:scan"));
         assert!(content.contains("r:refresh"));
     }
@@ -476,7 +473,7 @@ mod tests {
         app.ui_state.monitoring.route = MonitoringRoute::Home;
         assert_eq!(
             active_commands_for_view(&app),
-            "o:open  a:attach  e:explore  s:scan  r:refresh"
+            "o:open  a:attach  e:detail  s:scan  r:refresh"
         );
 
         app.ui_state.monitoring.route = MonitoringRoute::Home;

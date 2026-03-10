@@ -121,6 +121,52 @@ pub enum PanelFocus {
     Files,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitoringRouteMetadata {
+    pub route_label: &'static str,
+    pub breadcrumb: Option<&'static str>,
+    pub back_hint: Option<&'static str>,
+    pub drill_hint: Option<&'static str>,
+    pub focus_hint: &'static str,
+    pub panel_hints: &'static str,
+    pub search_hints: Option<&'static str>,
+}
+
+impl MonitoringRoute {
+    pub fn metadata(self, focused_panel: Option<PanelFocus>) -> MonitoringRouteMetadata {
+        match self {
+            Self::Home => {
+                let panel_hints = match focused_panel.unwrap_or(PanelFocus::Overview) {
+                    PanelFocus::Runs => "j/k:select  /:search  f:filter  Enter:open  r:refresh",
+                    PanelFocus::Processes => "j/k:select  a:attach  r:refresh",
+                    PanelFocus::Overview | PanelFocus::Files => {
+                        "o:open  a:attach  e:detail  s:scan  r:refresh"
+                    }
+                };
+
+                MonitoringRouteMetadata {
+                    route_label: "Home",
+                    breadcrumb: None,
+                    back_hint: None,
+                    drill_hint: Some("Enter:open focused"),
+                    focus_hint: "Tab:focus panel",
+                    panel_hints,
+                    search_hints: Some("Type:search  Enter:confirm  Esc:cancel"),
+                }
+            }
+            Self::RunDetail => MonitoringRouteMetadata {
+                route_label: "Run Detail",
+                breadcrumb: Some("Home > Run Detail"),
+                back_hint: Some("Esc:back"),
+                drill_hint: None,
+                focus_hint: "Tab:focus graph",
+                panel_hints: "1-4:box  -/=:zoom  Left/Right:pan  j/k:focus",
+                search_hints: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HomeFocusTarget {
     #[default]
@@ -597,34 +643,50 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
         ("?".to_string(), "Toggle help overlay".to_string()),
     ];
 
-    entries.push(("Home: o".to_string(), "Open file picker".to_string()));
-    entries.push(("Home: a".to_string(), "Attach to process".to_string()));
-    entries.push(("Home: e".to_string(), "Open run detail route".to_string()));
-    entries.push(("Home: s".to_string(), "Scan directory".to_string()));
-    entries.push(("Home: r".to_string(), "Refresh run list".to_string()));
-    entries.push(("Runs panel: j/k".to_string(), "Move cursor".to_string()));
-    entries.push(("Runs panel: /".to_string(), "Search runs".to_string()));
+    let home_overview_meta = MonitoringRoute::Home.metadata(Some(PanelFocus::Overview));
+    let home_runs_meta = MonitoringRoute::Home.metadata(Some(PanelFocus::Runs));
+    let home_processes_meta = MonitoringRoute::Home.metadata(Some(PanelFocus::Processes));
+    let run_detail_meta = MonitoringRoute::RunDetail.metadata(None);
+
     entries.push((
-        "Runs panel: f".to_string(),
-        "Cycle status filter".to_string(),
+        format!(
+            "{}: {}",
+            home_overview_meta.route_label, home_overview_meta.focus_hint
+        ),
+        "Cycle home focus targets".to_string(),
     ));
     entries.push((
-        "Runs panel: Enter".to_string(),
-        "Open active run".to_string(),
-    ));
-    entries.push(("Runs panel: r".to_string(), "Refresh".to_string()));
-    entries.push((
-        "Processes panel: j/k".to_string(),
-        "Move cursor".to_string(),
+        "Home route".to_string(),
+        home_overview_meta.panel_hints.to_string(),
     ));
     entries.push((
-        "Processes panel: a".to_string(),
-        "Attach to process".to_string(),
+        "Home > Runs".to_string(),
+        home_runs_meta.panel_hints.to_string(),
     ));
-    entries.push(("Processes panel: r".to_string(), "Refresh".to_string()));
+    entries.push((
+        "Home > Runs (search)".to_string(),
+        home_runs_meta.search_hints.unwrap_or_default().to_string(),
+    ));
+    entries.push((
+        "Home > Processes".to_string(),
+        home_processes_meta.panel_hints.to_string(),
+    ));
+    entries.push((
+        run_detail_meta
+            .breadcrumb
+            .unwrap_or(run_detail_meta.route_label)
+            .to_string(),
+        format!(
+            "{}  {}",
+            run_detail_meta.back_hint.unwrap_or_default(),
+            run_detail_meta.panel_hints
+        )
+        .trim()
+        .to_string(),
+    ));
 
     if profile == "vim" {
-        entries.push(("j/k".to_string(), "Switch view (vim)".to_string()));
+        entries.push(("j/k".to_string(), "Move focus (vim)".to_string()));
         entries.push(("h/l".to_string(), "Pan history (vim)".to_string()));
         entries.push((
             "Picker (vim): i".to_string(),
@@ -4492,9 +4554,9 @@ mod tests {
     #[test]
     fn test_keymap_entries_contains_new_bindings() {
         let entries = keymap_entries("default");
-        assert!(entries.iter().any(|(k, _)| k == "Home: e"));
-        assert!(entries.iter().any(|(k, _)| k == "Runs panel: /"));
-        assert!(entries.iter().any(|(k, _)| k == "Processes panel: a"));
+        assert!(entries.iter().any(|(k, _)| k == "Home route"));
+        assert!(entries.iter().any(|(k, _)| k == "Home > Runs"));
+        assert!(entries.iter().any(|(k, _)| k == "Home > Processes"));
     }
 
     #[test]
