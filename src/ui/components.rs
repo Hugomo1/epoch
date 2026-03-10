@@ -80,17 +80,17 @@ pub fn format_step(step: u64) -> String {
 pub fn format_epoch_date(secs: i64) -> String {
     let days = secs / 86400;
     let sec_in_day = secs % 86400;
-    
+
     // Naive leap year/month calculation for display purposes
     let year = 1970 + days / 365;
     let mut day_of_year = days % 365;
-    
+
     let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
     let mut days_in_month = vec![31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     if is_leap {
         days_in_month[1] = 29;
     }
-    
+
     let mut month = 0;
     for &d in &days_in_month {
         if day_of_year < d {
@@ -99,13 +99,15 @@ pub fn format_epoch_date(secs: i64) -> String {
         day_of_year -= d;
         month += 1;
     }
-    
-    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let m_str = month_names.get(month as usize).unwrap_or(&"Jan");
     let d = day_of_year + 1; // 1-indexed
-    
+
     let h = sec_in_day / 3600;
     let m = (sec_in_day % 3600) / 60;
-    
+
     format!("{} {:02} {:02}:{:02}", m_str, d, h, m)
 }

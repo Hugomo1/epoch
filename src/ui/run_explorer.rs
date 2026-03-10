@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, TableState};
 use crate::app::App;
 use crate::store::types::RunStatus;
 use crate::ui::components::{format_epoch_date, format_step, truncate};
-use crate::ui::theme::{resolve_palette_from_config, ThemePalette};
+use crate::ui::theme::{ThemePalette, resolve_palette_from_config};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = resolve_palette_from_config(&app.config);
@@ -34,7 +34,9 @@ fn render_filter_bar(
     let status_label = match state.status_filter {
         None => Span::styled("all", Style::default().fg(palette.muted)),
         Some(RunStatus::Active) => Span::styled("active", Style::default().fg(palette.accent)),
-        Some(RunStatus::Completed) => Span::styled("completed", Style::default().fg(palette.accent)),
+        Some(RunStatus::Completed) => {
+            Span::styled("completed", Style::default().fg(palette.accent))
+        }
         Some(RunStatus::Failed) => Span::styled("failed", Style::default().fg(palette.accent)),
     };
 
@@ -73,7 +75,8 @@ fn render_run_table(
     palette: &ThemePalette,
 ) {
     if state.records.is_empty() {
-        let text = "No runs found.\nStart a training run to record your first entry.\nPress r to refresh.";
+        let text =
+            "No runs found.\nStart a training run to record your first entry.\nPress r to refresh.";
         let p = Paragraph::new(text)
             .style(Style::default().fg(palette.muted))
             .alignment(ratatui::layout::Alignment::Center);
@@ -84,29 +87,38 @@ fn render_run_table(
     let header = Row::new(vec!["St", "Name", "Step", "Started", "Source"])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
-    let rows: Vec<Row> = state.records.iter().map(|rec| {
-        let (status_icon, status_color) = match rec.status {
-            RunStatus::Active => ("●", palette.success),
-            RunStatus::Completed => ("✓", palette.muted),
-            RunStatus::Failed => ("✗", palette.error),
-        };
+    let rows: Vec<Row> = state
+        .records
+        .iter()
+        .map(|rec| {
+            let (status_icon, status_color) = match rec.status {
+                RunStatus::Active => ("●", palette.success),
+                RunStatus::Completed => ("✓", palette.muted),
+                RunStatus::Failed => ("✗", palette.error),
+            };
 
-        let name = truncate(
-            rec.display_name.as_deref().unwrap_or(rec.source_locator.as_deref().unwrap_or("unnamed")),
-            20,
-        );
-        let step = rec.last_step.map(format_step).unwrap_or_else(|| "-".to_string());
-        let started = format_epoch_date(rec.started_at_epoch_secs);
-        let source = rec.source_kind.as_str();
+            let name = truncate(
+                rec.display_name
+                    .as_deref()
+                    .unwrap_or(rec.source_locator.as_deref().unwrap_or("unnamed")),
+                20,
+            );
+            let step = rec
+                .last_step
+                .map(format_step)
+                .unwrap_or_else(|| "-".to_string());
+            let started = format_epoch_date(rec.started_at_epoch_secs);
+            let source = rec.source_kind.as_str();
 
-        Row::new(vec![
-            Line::from(Span::styled(status_icon, Style::default().fg(status_color))),
-            Line::from(name),
-            Line::from(step),
-            Line::from(started),
-            Line::from(source.to_string()),
-        ])
-    }).collect();
+            Row::new(vec![
+                Line::from(Span::styled(status_icon, Style::default().fg(status_color))),
+                Line::from(name),
+                Line::from(step),
+                Line::from(started),
+                Line::from(source.to_string()),
+            ])
+        })
+        .collect();
 
     let table = Table::new(
         rows,
@@ -151,9 +163,13 @@ fn render_detail_strip(
     } else if !state.records.is_empty() && state.selected_idx < state.records.len() {
         let rec = &state.records[state.selected_idx];
         let loc = truncate(rec.source_locator.as_deref().unwrap_or(""), 40);
-        let id_trunc = if rec.run_id.len() > 8 { &rec.run_id[..8] } else { &rec.run_id };
+        let id_trunc = if rec.run_id.len() > 8 {
+            &rec.run_id[..8]
+        } else {
+            &rec.run_id
+        };
         let text = format!("  {}   |   Run ID: {}", loc, id_trunc);
-        
+
         let block = Block::default()
             .title("Detail")
             .borders(Borders::ALL)
@@ -180,8 +196,8 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_terminal() -> Terminal<TestBackend> {
         Terminal::new(TestBackend::new(120, 40)).unwrap()
@@ -191,13 +207,18 @@ mod tests {
     fn test_run_explorer_renders_empty() {
         let app = App::new(Default::default());
         let mut terminal = make_terminal();
-        terminal.draw(|frame| {
-            render(frame, frame.area(), &app);
-        }).unwrap();
-        
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &app);
+            })
+            .unwrap();
+
         let buffer = terminal.backend().buffer().clone();
         let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
-        assert!(content.contains("No runs found"), "Expected 'No runs found' in buffer");
+        assert!(
+            content.contains("No runs found"),
+            "Expected 'No runs found' in buffer"
+        );
     }
 
     #[test]
@@ -220,17 +241,25 @@ mod tests {
             last_step: Some(42),
             last_updated_epoch_secs: 1600000000,
         });
-        
+
         let mut terminal = make_terminal();
-        terminal.draw(|frame| {
-            render(frame, frame.area(), &app);
-        }).unwrap();
-        
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &app);
+            })
+            .unwrap();
+
         let buffer = terminal.backend().buffer().clone();
         let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(content.contains("MyTestRun"), "Expected run name in buffer");
-        assert!(content.contains("process"), "Expected source kind in buffer");
-        assert!(content.contains("test-id-"), "Expected run id in detail strip");
+        assert!(
+            content.contains("process"),
+            "Expected source kind in buffer"
+        );
+        assert!(
+            content.contains("test-id-"),
+            "Expected run id in detail strip"
+        );
     }
 
     #[test]
@@ -238,14 +267,19 @@ mod tests {
         let mut app = App::new(Default::default());
         app.ui_state.explorer.search_active = true;
         app.ui_state.explorer.search_query = "foo".to_string();
-        
+
         let mut terminal = make_terminal();
-        terminal.draw(|frame| {
-            render(frame, frame.area(), &app);
-        }).unwrap();
-        
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &app);
+            })
+            .unwrap();
+
         let buffer = terminal.backend().buffer().clone();
         let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
-        assert!(content.contains("Search: foo|"), "Expected search strip content");
+        assert!(
+            content.contains("Search: foo|"),
+            "Expected search strip content"
+        );
     }
 }

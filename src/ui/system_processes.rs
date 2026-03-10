@@ -1,16 +1,16 @@
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table, TableState},
-    Frame,
 };
 
 use crate::app::App;
 use crate::collectors::process::ProbeStatus;
 use crate::store::types::system_processes_columns;
 use crate::ui::components::{format_bytes, truncate};
-use crate::ui::theme::{resolve_palette_from_config, ThemePalette};
+use crate::ui::theme::{ThemePalette, resolve_palette_from_config};
 use crate::ui::{CPU_COLOR, GPU_COLOR, RAM_COLOR};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -43,14 +43,14 @@ fn render_resource_strip(frame: &mut Frame, area: Rect, app: &App, palette: &The
         .as_ref()
         .map(|s| s.memory_usage_percent())
         .unwrap_or(0.0);
-    
+
     let gpu_util = app
         .system
         .latest
         .as_ref()
         .and_then(|s| s.gpus.first())
         .map(|g| g.utilization);
-        
+
     let has_gpu = app
         .system
         .latest
@@ -92,7 +92,7 @@ fn make_resource_line(
 
     let sparkline_chars = " ▁▂▃▄▅▆▇█";
     let mut spark = String::new();
-    
+
     let tail = if history.len() > 20 {
         &history[history.len() - 20..]
     } else {
@@ -163,12 +163,11 @@ fn render_processes_table(frame: &mut Frame, area: Rect, app: &App, palette: &Th
         ]));
     }
 
-    let header = Row::new(vec!["PID", "Command", "CWD", "CPU", "Memory", "Status"])
-        .style(
-            Style::default()
-                .fg(palette.header_fg)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Row::new(vec!["PID", "Command", "CWD", "CPU", "Memory", "Status"]).style(
+        Style::default()
+            .fg(palette.header_fg)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let widths = [
         Constraint::Length(6),
@@ -203,8 +202,8 @@ pub fn required_columns() -> [&'static str; 5] {
 mod tests {
     use super::*;
     use crate::app::App;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_terminal() -> Terminal<TestBackend> {
         Terminal::new(TestBackend::new(120, 40)).unwrap()
