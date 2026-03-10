@@ -11,13 +11,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let [info_area, views_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-    let view_titles: Vec<&str> = vec![
-        "Home",
-        "Live Run",
-        "Run Explorer",
-        "Events/Notes",
-        "System/Processes",
-    ];
+    let view_titles: Vec<&str> = vec!["Home", "Live Run", "Run Explorer", "System/Processes"];
 
     let views = Tabs::new(view_titles)
         .select(app.ui_state.primary_view.index())

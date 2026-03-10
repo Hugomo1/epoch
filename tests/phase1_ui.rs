@@ -1,30 +1,30 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use epoch::app::{App, PrimaryView};
 use epoch::config::Config;
-use epoch::ui::events_notes;
-use epoch::ui::home;
-use epoch::ui::phase1_primary_views;
-use epoch::ui::run_explorer;
-use epoch::ui::system_processes;
+use epoch::home::service::default_actions;
+use epoch::store::types::{
+    filter_runs_by_project_status_date, fuzzy_search_runs, run_explorer_columns,
+    system_processes_columns,
+};
 
 #[test]
 fn navigation_routes_include_phase1_views() {
+    use epoch::ui::phase1_primary_views;
     let views = phase1_primary_views();
     assert!(views.contains(&PrimaryView::Home));
     assert!(views.contains(&PrimaryView::LiveRun));
     assert!(views.contains(&PrimaryView::RunExplorer));
-    assert!(views.contains(&PrimaryView::EventsNotes));
     assert!(views.contains(&PrimaryView::SystemProcesses));
 }
 
 #[test]
 fn primary_view_count_matches_phase1_views() {
+    use epoch::ui::phase1_primary_views;
     let views = phase1_primary_views();
-    assert_eq!(views.len(), 5);
+    assert_eq!(views.len(), 4);
     assert!(views.contains(&PrimaryView::Home));
     assert!(views.contains(&PrimaryView::LiveRun));
     assert!(views.contains(&PrimaryView::RunExplorer));
-    assert!(views.contains(&PrimaryView::EventsNotes));
     assert!(views.contains(&PrimaryView::SystemProcesses));
 }
 
@@ -36,7 +36,8 @@ fn explicit_source_skips_home_and_starts_live_run() {
 
 #[test]
 fn home_view_renders_required_sections() {
-    let sections = home::home_sections();
+    use epoch::home::service::home_sections;
+    let sections = home_sections();
     for required in [
         "Active Runs",
         "Recent Runs",
@@ -51,7 +52,7 @@ fn home_view_renders_required_sections() {
 
 #[test]
 fn home_empty_state_offers_required_actions() {
-    let actions = epoch::home::service::default_actions();
+    let actions = default_actions();
     let ids = actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
     for required in [
         "attach_active_run",
@@ -66,7 +67,7 @@ fn home_empty_state_offers_required_actions() {
 
 #[test]
 fn run_explorer_renders_required_columns() {
-    let columns = run_explorer::explorer_columns();
+    let columns = run_explorer_columns();
     for required in [
         "Name",
         "Project",
@@ -101,8 +102,7 @@ fn run_explorer_filters_by_project_status_date() {
             "2026-03-06".to_string(),
         ),
     ];
-    let filtered =
-        run_explorer::filter_runs_by_project_status_date(&rows, "proj-a", "active", "2026-03-06");
+    let filtered = filter_runs_by_project_status_date(&rows, "proj-a", "active", "2026-03-06");
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].0, "proj-a");
     assert_eq!(filtered[0].1, "active");
@@ -115,20 +115,15 @@ fn run_explorer_fuzzy_search_returns_expected_matches() {
         "run-beta".to_string(),
         "evaluation".to_string(),
     ];
-    let found = run_explorer::fuzzy_search_runs(&rows, "run");
+    let found = fuzzy_search_runs(&rows, "run");
     assert_eq!(found.len(), 2);
     assert!(found.contains(&"run-alpha".to_string()));
     assert!(found.contains(&"run-beta".to_string()));
 }
 
 #[test]
-fn events_notes_view_supports_add_filter_pin_jump() {
-    assert!(events_notes::supports_required_actions());
-}
-
-#[test]
 fn system_processes_view_renders_pid_command_cwd_usage() {
-    let columns = system_processes::required_columns();
+    let columns = system_processes_columns();
     assert_eq!(columns, ["PID", "Command", "CWD", "CPU", "Memory"]);
 }
 
@@ -141,11 +136,11 @@ fn key_driven_view_switching_routes_primary_views() {
     assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.ui_state.primary_view, PrimaryView::EventsNotes);
-
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.ui_state.primary_view, PrimaryView::Home);
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
 }
