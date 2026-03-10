@@ -3329,7 +3329,7 @@ mod tests {
         app.ui_state.focused_box = 3;
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.ui_state.focused_box, 3);
+        assert_eq!(app.ui_state.focused_box, 4);
     }
 
     #[test]

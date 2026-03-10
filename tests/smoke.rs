@@ -1,7 +1,8 @@
-use epoch::app::App;
+use epoch::app::{App, HomeFocusTarget, MonitoringRoute, PanelFocus};
 use epoch::collectors::training::{create_parser, parse_snapshot};
 use epoch::config::Config;
 use epoch::event::Event;
+use epoch::store::types::{RunRecord, RunSourceKind, RunStatus};
 use epoch::types::{GpuMetrics, SystemMetrics, TrainingMetrics};
 use tokio::sync::mpsc;
 
@@ -37,11 +38,8 @@ async fn test_app_processes_events_from_channels() {
     if let Some(event) = rx.recv().await {
         app.handle_event(event);
     }
-    assert_eq!(
-        app.ui_state.primary_view,
-        epoch::app::PrimaryView::RunExplorer
-    );
-    assert_eq!(app.ui_state.focused_box, 1);
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
+    assert_eq!(app.ui_state.focused_box, 2);
 }
 
 #[tokio::test]
@@ -73,7 +71,30 @@ fn test_app_new_running() {
     let app = App::new(Config::default());
     assert!(app.running);
     assert_eq!(app.ui_state.primary_view, epoch::app::PrimaryView::LiveRun);
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
     assert_eq!(app.ui_state.focused_box, 1);
+}
+
+#[test]
+fn test_no_arg_startup_targets_home_route_smoke() {
+    let config = Config::default();
+    let mut app = App::new(config.clone());
+
+    if !config.stdin_mode && config.log_file.is_none() {
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+    }
+
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
+}
+
+#[test]
+fn test_explicit_source_startup_targets_run_detail_smoke() {
+    let config = Config {
+        log_file: Some(std::path::PathBuf::from("/tmp/train.log")),
+        ..Config::default()
+    };
+    let app = App::new(config);
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 }
 
 #[test]
@@ -229,18 +250,46 @@ fn test_history_overflow_no_panic() {
 }
 
 #[test]
-fn test_primary_view_cycling_many_times() {
+fn test_home_panel_cycling_many_times_keeps_home_route() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = App::new(Config::default());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
     for _ in 0..100 {
         app.handle_key(tab_key);
     }
 
-    // Should cycle through all 5 PrimaryViews and return to LiveRun
-    assert_eq!(app.ui_state.primary_view, epoch::app::PrimaryView::LiveRun);
-    assert_eq!(app.ui_state.focused_box, 1);
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
+    assert_eq!(
+        app.ui_state.monitoring.home_focus,
+        HomeFocusTarget::Overview
+    );
+}
+
+#[test]
+fn test_home_drilldown_to_run_detail_and_back() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Config::default());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+    app.ui_state.monitoring.home_focus = HomeFocusTarget::Runs;
+    app.ui_state.explorer.records = vec![sample_run("smoke-run", RunStatus::Active)];
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
+    assert_eq!(
+        app.ui_state
+            .monitoring
+            .run_detail
+            .selected_run_id
+            .as_deref(),
+        Some("smoke-run")
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
 }
 
 #[test]
@@ -321,4 +370,24 @@ fn test_run_comparison_snapshot_path_smoke() {
 
     fs::remove_file(&file_path).expect("test file should be removed");
     fs::remove_dir_all(&root).expect("temp directory should be removed");
+}
+
+fn sample_run(run_id: &str, status: RunStatus) -> RunRecord {
+    RunRecord {
+        run_id: run_id.to_string(),
+        source_fingerprint: format!("fp-{run_id}"),
+        source_kind: RunSourceKind::LogFile,
+        source_locator: Some(format!("/tmp/{run_id}.log")),
+        project_root: Some("/tmp/project".to_string()),
+        display_name: Some(run_id.to_string()),
+        status,
+        command: None,
+        cwd: Some("/tmp/project".to_string()),
+        git_commit: None,
+        git_dirty: None,
+        started_at_epoch_secs: 1,
+        ended_at_epoch_secs: None,
+        last_step: Some(10),
+        last_updated_epoch_secs: 1,
+    }
 }

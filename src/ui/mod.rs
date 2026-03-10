@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_render_command_bar_content() {
-        let backend = TestBackend::new(80, 5);
+        let backend = TestBackend::new(180, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
         app.running = true;
@@ -344,19 +344,15 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let mut found = false;
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                if buffer.cell((x, y)).unwrap().symbol() == "T"
-                    && buffer.cell((x + 1, y)).unwrap().symbol() == "a"
-                    && buffer.cell((x + 2, y)).unwrap().symbol() == "b"
-                {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        assert!(found);
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        assert!(content.contains("Tab:panels"));
     }
 
     #[test]
@@ -552,6 +548,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
 
         app.push_metrics(TrainingMetrics {
             loss: Some(0.5),
@@ -592,6 +589,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
         app.push_metrics(TrainingMetrics {
             loss: Some(0.5),
             learning_rate: Some(1e-4),
@@ -621,6 +619,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
 
         app.push_metrics(TrainingMetrics {
             loss: Some(0.5),
@@ -646,6 +645,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
         app.push_metrics(TrainingMetrics {
             loss: Some(0.5),
             learning_rate: Some(1e-4),
@@ -666,6 +666,6 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        assert!(content.contains("[1] Loss"));
+        assert!(content.contains("Loss:"));
     }
 }

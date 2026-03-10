@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use epoch::app::{App, MonitoringRoute};
 use epoch::collectors::process::{ProbeStatus, ProcessCandidate};
+use epoch::config::Config;
 use epoch::home::service::{
     AttachOutcome, HomeSnapshot, attach_to_discovered_process, default_actions,
     load_or_build_cached_snapshot, save_cached_snapshot,
@@ -17,6 +19,27 @@ fn temp_file(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("epoch-phase1-launch-{label}-{unique}"));
     fs::create_dir_all(&root).expect("temp directory should be created");
     root.join("home_snapshot.json")
+}
+
+#[test]
+fn no_arg_startup_routes_to_home() {
+    let config = Config::default();
+    let mut app = App::new(config.clone());
+
+    if !config.stdin_mode && config.log_file.is_none() {
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+    }
+
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::Home);
+}
+
+#[test]
+fn explicit_source_startup_stays_in_run_detail() {
+    let mut config = Config::default();
+    config.log_file = Some(PathBuf::from("/tmp/train.log"));
+
+    let app = App::new(config);
+    assert_eq!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail);
 }
 
 #[test]

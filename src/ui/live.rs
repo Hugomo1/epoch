@@ -559,6 +559,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-1".to_string());
         app.push_metrics(TrainingMetrics {
             loss: Some(0.5),
             learning_rate: Some(1e-4),
