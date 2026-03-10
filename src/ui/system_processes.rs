@@ -22,10 +22,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     render_resource_strip(frame, chunks[0], app, &palette);
-    render_processes_table(frame, chunks[1], app, &palette);
+    render_processes_table(frame, chunks[1], app, &palette, false);
 }
 
-fn render_resource_strip(frame: &mut Frame, area: Rect, app: &App, palette: &ThemePalette) {
+pub fn render_resource_strip(frame: &mut Frame, area: Rect, app: &App, palette: &ThemePalette) {
     let block = Block::default()
         .title(" System Resources ")
         .borders(Borders::ALL)
@@ -114,7 +114,13 @@ fn make_resource_line(
     ])
 }
 
-fn render_processes_table(frame: &mut Frame, area: Rect, app: &App, palette: &ThemePalette) {
+pub fn render_processes_table(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    palette: &ThemePalette,
+    is_focused: bool,
+) {
     let count = app.discovered_processes.len();
     let title = if count > 0 {
         format!(" ⚡ Processes ({}) ", count)
@@ -122,14 +128,23 @@ fn render_processes_table(frame: &mut Frame, area: Rect, app: &App, palette: &Th
         " ⚡ Processes ".to_string()
     };
 
-    let border_style = if count > 0 {
-        Style::default().fg(palette.warning)
+    let mut border_style = Style::default();
+    let mut title_style = Style::default();
+
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else if count > 0 {
+        border_style = border_style.fg(palette.warning);
+        title_style = title_style.fg(palette.header_fg);
     } else {
-        Style::default().fg(palette.muted)
-    };
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
 
     let block = Block::default()
         .title(title)
+        .title_style(title_style)
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -189,7 +204,12 @@ fn render_processes_table(frame: &mut Frame, area: Rect, app: &App, palette: &Th
         );
 
     let mut state = TableState::default();
-    state.select(Some(app.ui_state.selected_process_idx));
+    let selected_idx = app
+        .ui_state
+        .monitoring
+        .selected_pid
+        .and_then(|pid| app.discovered_processes.iter().position(|p| p.pid == pid));
+    state.select(selected_idx);
 
     frame.render_stateful_widget(table, area, &mut state);
 }

@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, HighlightSpacing, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use std::time::SystemTime;
 
 use crate::app::{App, HomeFocusTarget};
@@ -61,7 +61,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         app,
         *focus == HomeFocusTarget::Runs,
     );
-    render_processes(
+    crate::ui::system_processes::render_processes_table(
         frame,
         processes_area,
         app,
@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         &palette,
         *focus == HomeFocusTarget::Files,
     );
-    render_system_summary(frame, system_area, app, &palette);
+    crate::ui::system_processes::render_resource_strip(frame, system_area, app, &palette);
     render_alerts(
         frame,
         alerts_area,
@@ -160,99 +160,6 @@ fn render_overview(
     }
 }
 
-fn render_processes(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-    is_focused: bool,
-) {
-    let count = app.discovered_processes.len();
-    let title = format!("⚡  Processes ({})", count);
-
-    let mut title_style = Style::default();
-    let mut border_style = Style::default();
-
-    if is_focused {
-        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-    } else if count > 0 {
-        border_style = border_style.fg(palette.warning);
-        title_style = title_style.fg(palette.header_fg);
-    } else {
-        border_style = border_style.fg(palette.muted);
-        title_style = title_style.fg(palette.header_fg);
-    }
-
-    let block = Block::default()
-        .title(title)
-        .title_style(title_style)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    if count == 0 {
-        let paragraph = Paragraph::new("No training processes detected")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let selected_idx = app
-        .ui_state
-        .monitoring
-        .selected_pid
-        .and_then(|pid| app.discovered_processes.iter().position(|p| p.pid == pid));
-
-    let header = Row::new(vec!["PID", "Command", "CPU%"]).style(
-        Style::default()
-            .fg(palette.header_fg)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let rows: Vec<Row> = app
-        .discovered_processes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let cmd = truncate(&p.command, 25);
-            let cpu = p.cpu_milli_percent / 10;
-
-            let is_selected = Some(i) == selected_idx;
-            let mut style = Style::default();
-
-            if is_selected && is_focused {
-                style = style.fg(palette.header_bg).bg(palette.accent);
-            } else if is_selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            } else {
-                style = style.fg(palette.header_fg);
-            }
-
-            Row::new(vec![
-                Line::from(format!("{}", p.pid)),
-                Line::from(cmd),
-                Line::from(format!("{}%", cpu)),
-            ])
-            .style(style)
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(7),
-        Constraint::Min(10),
-        Constraint::Length(6),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block)
-        .highlight_spacing(HighlightSpacing::Always);
-
-    frame.render_widget(table, area);
-}
-
 fn render_files(
     frame: &mut Frame,
     area: Rect,
@@ -308,73 +215,6 @@ fn render_files(
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
-}
-
-fn render_system_summary(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-) {
-    let block = Block::default()
-        .title("System Summary")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.muted));
-
-    if let Some(system) = app.system.latest.as_ref() {
-        let mem_pct = system.memory_usage_percent();
-
-        let cpu_line = Line::from(vec![
-            Span::styled("CPU: ", Style::default().fg(palette.cpu_color)),
-            Span::styled(
-                format!("{:.1}%", system.cpu_usage),
-                Style::default().fg(palette.header_fg),
-            ),
-        ]);
-
-        let ram_line = Line::from(vec![
-            Span::styled("RAM: ", Style::default().fg(palette.ram_color)),
-            Span::styled(
-                format!("{:.1}%", mem_pct),
-                Style::default().fg(palette.header_fg),
-            ),
-        ]);
-
-        let mut lines = vec![cpu_line, ram_line];
-
-        if !system.gpus.is_empty() {
-            lines.push(Line::from(""));
-            for (i, gpu) in system.gpus.iter().enumerate() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("GPU {}: ", i),
-                        Style::default().fg(palette.gpu_color),
-                    ),
-                    Span::styled(
-                        format!(
-                            "{:.1}% util, {:.1}% mem",
-                            gpu.utilization,
-                            if gpu.memory_total > 0 {
-                                (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0
-                            } else {
-                                0.0
-                            }
-                        ),
-                        Style::default().fg(palette.header_fg),
-                    ),
-                ]));
-            }
-        }
-
-        let paragraph = Paragraph::new(lines).block(block);
-        frame.render_widget(paragraph, area);
-    } else {
-        let paragraph = Paragraph::new("No system metrics available")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-    }
 }
 
 fn render_alerts(
