@@ -1,6 +1,6 @@
 pub mod advanced;
+pub mod components;
 pub mod dashboard;
-pub mod events_notes;
 pub mod file_picker;
 pub mod graph;
 pub mod header;
@@ -50,12 +50,11 @@ pub fn metric_value_style() -> Style {
     Style::default().fg(ACCENT)
 }
 
-pub fn phase1_primary_views() -> [PrimaryView; 5] {
+pub fn phase1_primary_views() -> [PrimaryView; 4] {
     [
         PrimaryView::Home,
         PrimaryView::LiveRun,
         PrimaryView::RunExplorer,
-        PrimaryView::EventsNotes,
         PrimaryView::SystemProcesses,
     ]
 }
@@ -101,7 +100,6 @@ pub fn render(frame: &mut Frame, app: &App) {
             PrimaryView::Home => home::render(frame, content_area, app),
             PrimaryView::LiveRun => live::render(frame, content_area, app),
             PrimaryView::RunExplorer => run_explorer::render(frame, content_area, app),
-            PrimaryView::EventsNotes => events_notes::render(frame, content_area, app),
             PrimaryView::SystemProcesses => system_processes::render(frame, content_area, app),
         },
     }
@@ -115,22 +113,43 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
         .fg(palette.header_fg)
         .bg(palette.header_bg);
 
-    let (local, global) = match &app.ui_state.mode {
+    let (box_cmds, tab_cmds, global_cmds) = match &app.ui_state.mode {
         AppMode::Monitoring => {
-            let local_cmds = match app.ui_state.primary_view {
+            let box_level = match app.ui_state.primary_view {
                 PrimaryView::LiveRun => {
-                    format!(" [{}] -/=:zoom Left/Right:pan", app.ui_state.focused_box)
+                    format!(
+                        "[{}] -/=:zoom Left/Right:pan j/k:focus",
+                        app.ui_state.focused_box
+                    )
                 }
                 _ => String::new(),
             };
-            let global_cmds = "?:help s:settings Tab:views Space:pause g:reset q:quit ".to_string();
-            (local_cmds, global_cmds)
+            let tab_level = match app.ui_state.primary_view {
+                PrimaryView::LiveRun => "1-4:box".to_string(),
+                PrimaryView::Home => "o:open  a:attach  e:explore  s:scan  r:refresh".to_string(),
+                PrimaryView::RunExplorer => {
+                    if app.ui_state.explorer.search_active {
+                        "Type:search  Enter:confirm  Esc:cancel".to_string()
+                    } else {
+                        "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+                    }
+                }
+                PrimaryView::SystemProcesses => "j/k:select  a:attach  r:refresh".to_string(),
+            };
+            let global_level =
+                "?:help s:settings Tab:views Space:pause g:reset q:quit ".to_string();
+            (box_level, tab_level, global_level)
         }
         AppMode::Settings(_) => (
+            String::new(),
             " Up/Down:row Left/Right:change a:apply w/Enter:save Esc:cancel".to_string(),
             String::new(),
         ),
-        AppMode::Help(_) => (" ?:close Esc:close".to_string(), String::new()),
+        AppMode::Help(_) => (
+            " ?:close Esc:close".to_string(),
+            String::new(),
+            String::new(),
+        ),
         AppMode::FilePicker(state) => {
             let cmds = if app.config.keymap_profile == "vim" {
                 match state.input_mode {
@@ -144,23 +163,30 @@ fn render_command_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App)
             } else {
                 " Type:filter Up/Down:select Enter:open Esc:quit".to_string()
             };
-            (cmds, String::new())
+            (String::new(), cmds, String::new())
         }
-        AppMode::Scanning => (" Scanning files...".to_string(), String::new()),
+        AppMode::Scanning => (
+            " Scanning files...".to_string(),
+            String::new(),
+            String::new(),
+        ),
     };
 
-    let [local_area, global_area] = ratatui::layout::Layout::horizontal([
+    let [box_area, tab_area, global_area] = ratatui::layout::Layout::horizontal([
+        ratatui::layout::Constraint::Fill(1),
         ratatui::layout::Constraint::Fill(1),
         ratatui::layout::Constraint::Fill(1),
     ])
     .areas(area);
 
-    let local_widget = ratatui::widgets::Paragraph::new(local).style(bar_style);
-    let global_widget = ratatui::widgets::Paragraph::new(global)
+    let box_widget = ratatui::widgets::Paragraph::new(box_cmds).style(bar_style);
+    let tab_widget = ratatui::widgets::Paragraph::new(tab_cmds).style(bar_style);
+    let global_widget = ratatui::widgets::Paragraph::new(global_cmds)
         .alignment(ratatui::layout::Alignment::Right)
         .style(bar_style);
 
-    frame.render_widget(local_widget, local_area);
+    frame.render_widget(box_widget, box_area);
+    frame.render_widget(tab_widget, tab_area);
     frame.render_widget(global_widget, global_area);
 }
 
@@ -169,7 +195,15 @@ pub fn active_commands_for_view(app: &App) -> String {
         PrimaryView::LiveRun => {
             format!("[{}] -/=:zoom Left/Right:pan", app.ui_state.focused_box)
         }
-        _ => String::new(),
+        PrimaryView::Home => "o:open  a:attach  e:explore  s:scan  r:refresh".to_string(),
+        PrimaryView::RunExplorer => {
+            if app.ui_state.explorer.search_active {
+                "Type:search  Enter:confirm  Esc:cancel".to_string()
+            } else {
+                "j/k:select  /:search  f:filter  Enter:open  r:refresh".to_string()
+            }
+        }
+        PrimaryView::SystemProcesses => "j/k:select  a:attach  r:refresh".to_string(),
     }
 }
 
@@ -331,6 +365,124 @@ mod tests {
             .join("\n");
 
         assert!(content.contains("?:help"));
+    }
+
+    #[test]
+    fn test_command_bar_home_shows_real_shortcuts() {
+        let backend = TestBackend::new(180, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::Home;
+
+        terminal
+            .draw(|frame| {
+                render_command_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("o:open"));
+        assert!(content.contains("a:attach"));
+        assert!(content.contains("e:explore"));
+        assert!(content.contains("s:scan"));
+        assert!(content.contains("r:refresh"));
+    }
+
+    #[test]
+    fn test_command_bar_run_explorer_search_mode() {
+        let backend = TestBackend::new(180, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.explorer.search_active = true;
+
+        terminal
+            .draw(|frame| {
+                render_command_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("Type:search"));
+        assert!(content.contains("Enter:confirm"));
+        assert!(content.contains("Esc:cancel"));
+    }
+
+    #[test]
+    fn test_command_bar_system_processes_removes_track_hint() {
+        let backend = TestBackend::new(180, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+
+        terminal
+            .draw(|frame| {
+                render_command_bar(frame, frame.area(), &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        assert!(content.contains("j/k:select"));
+        assert!(content.contains("a:attach"));
+        assert!(content.contains("r:refresh"));
+        assert!(!content.contains("t:track"));
+    }
+
+    #[test]
+    fn test_active_commands_for_view_matches_monitoring_views() {
+        let mut app = App::new(Config::default());
+
+        app.ui_state.primary_view = PrimaryView::Home;
+        assert_eq!(
+            active_commands_for_view(&app),
+            "o:open  a:attach  e:explore  s:scan  r:refresh"
+        );
+
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        assert_eq!(
+            active_commands_for_view(&app),
+            "j/k:select  /:search  f:filter  Enter:open  r:refresh"
+        );
+
+        app.ui_state.explorer.search_active = true;
+        assert_eq!(
+            active_commands_for_view(&app),
+            "Type:search  Enter:confirm  Esc:cancel"
+        );
+
+        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+        app.ui_state.explorer.search_active = false;
+        assert_eq!(
+            active_commands_for_view(&app),
+            "j/k:select  a:attach  r:refresh"
+        );
     }
 
     #[test]
