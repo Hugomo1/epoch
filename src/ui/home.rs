@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, HighlightSpacing};
+use ratatui::widgets::{Block, Borders, HighlightSpacing, Paragraph, Row, Table};
 use std::time::SystemTime;
 
 use crate::app::{App, HomeFocusTarget};
@@ -48,12 +48,41 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let focus = &app.ui_state.monitoring.home_focus;
 
-    render_overview(frame, overview_area, app, &palette, *focus == HomeFocusTarget::Overview);
-    render_runs(frame, runs_area, app, &palette, *focus == HomeFocusTarget::Runs);
-    render_processes(frame, processes_area, app, &palette, *focus == HomeFocusTarget::Processes);
-    render_files(frame, files_area, app, &palette, *focus == HomeFocusTarget::Files);
+    render_overview(
+        frame,
+        overview_area,
+        app,
+        &palette,
+        *focus == HomeFocusTarget::Overview,
+    );
+    crate::ui::run_explorer::render_runs_panel(
+        frame,
+        runs_area,
+        app,
+        *focus == HomeFocusTarget::Runs,
+    );
+    render_processes(
+        frame,
+        processes_area,
+        app,
+        &palette,
+        *focus == HomeFocusTarget::Processes,
+    );
+    render_files(
+        frame,
+        files_area,
+        app,
+        &palette,
+        *focus == HomeFocusTarget::Files,
+    );
     render_system_summary(frame, system_area, app, &palette);
-    render_alerts(frame, alerts_area, app, &palette, *focus == HomeFocusTarget::Alerts);
+    render_alerts(
+        frame,
+        alerts_area,
+        app,
+        &palette,
+        *focus == HomeFocusTarget::Alerts,
+    );
 }
 
 fn render_overview(
@@ -70,10 +99,10 @@ fn render_overview(
     } else {
         "○  No Active Run"
     };
-    
+
     let mut border_style = Style::default();
     let mut title_style = Style::default();
-    
+
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
         title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
@@ -100,7 +129,7 @@ fn render_overview(
             .loss
             .map(|v| format!("{:.4}", v))
             .unwrap_or_else(|| "N/A".to_string());
-            
+
         let lr = latest
             .learning_rate
             .map(|v| format!("{:.2e}", v))
@@ -109,7 +138,11 @@ fn render_overview(
         let content = vec![
             Line::from(format!("Step: {:<8} Loss: {:<8} LR: {}", step, loss, lr)),
             Line::from(Span::styled(
-                if is_focused { "[Press Enter to view Live Metrics]" } else { "" },
+                if is_focused {
+                    "[Press Enter to view Live Metrics]"
+                } else {
+                    ""
+                },
                 Style::default().fg(palette.muted),
             )),
         ];
@@ -127,104 +160,6 @@ fn render_overview(
     }
 }
 
-fn render_runs(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-    is_focused: bool,
-) {
-    let mut title_style = Style::default();
-    let mut border_style = Style::default();
-    
-    if is_focused {
-        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-    } else {
-        border_style = border_style.fg(palette.muted);
-        title_style = title_style.fg(palette.header_fg);
-    }
-
-    let block = Block::default()
-        .title("Recent Runs")
-        .title_style(title_style)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    if app.recent_runs.is_empty() {
-        let content = "No runs recorded yet.\nRun epoch with a training log to record your first run.";
-        let paragraph = Paragraph::new(content)
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let selected_idx = app
-        .ui_state
-        .monitoring
-        .selected_run_id
-        .as_ref()
-        .and_then(|id| app.recent_runs.iter().position(|r| &r.run_id == id));
-
-    let header = Row::new(vec!["St", "Name", "Step", "Date"])
-        .style(Style::default().fg(palette.header_fg).add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = app
-        .recent_runs
-        .iter()
-        .enumerate()
-        .map(|(i, run)| {
-            let (icon, icon_color) = match run.status {
-                crate::store::types::RunStatus::Active => ("●", palette.success),
-                crate::store::types::RunStatus::Completed => ("✓", palette.muted),
-                crate::store::types::RunStatus::Failed => ("✗", palette.error),
-            };
-
-            let name = truncate(run.display_name.as_deref().unwrap_or("unnamed"), 18);
-            let step = run
-                .last_step
-                .map(format_step)
-                .unwrap_or_else(|| "-".to_string());
-            let date = format_epoch_date(run.started_at_epoch_secs);
-
-            let is_selected = Some(i) == selected_idx;
-            let mut style = Style::default();
-            
-            if is_selected && is_focused {
-                style = style.fg(palette.header_bg).bg(palette.accent);
-            } else if is_selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            } else {
-                style = style.fg(palette.header_fg);
-            }
-
-            Row::new(vec![
-                Line::from(Span::styled(icon, Style::default().fg(if is_selected { style.fg.unwrap_or(icon_color) } else { icon_color }))),
-                Line::from(name),
-                Line::from(step),
-                Line::from(date),
-            ])
-            .style(style)
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(2),
-        Constraint::Min(10),
-        Constraint::Length(8),
-        Constraint::Length(12),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block)
-        .highlight_spacing(HighlightSpacing::Always);
-
-    frame.render_widget(table, area);
-}
-
 fn render_processes(
     frame: &mut Frame,
     area: Rect,
@@ -234,10 +169,10 @@ fn render_processes(
 ) {
     let count = app.discovered_processes.len();
     let title = format!("⚡  Processes ({})", count);
-    
+
     let mut title_style = Style::default();
     let mut border_style = Style::default();
-    
+
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
         title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
@@ -270,8 +205,11 @@ fn render_processes(
         .selected_pid
         .and_then(|pid| app.discovered_processes.iter().position(|p| p.pid == pid));
 
-    let header = Row::new(vec!["PID", "Command", "CPU%"])
-        .style(Style::default().fg(palette.header_fg).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec!["PID", "Command", "CPU%"]).style(
+        Style::default()
+            .fg(palette.header_fg)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .discovered_processes
@@ -280,10 +218,10 @@ fn render_processes(
         .map(|(i, p)| {
             let cmd = truncate(&p.command, 25);
             let cpu = p.cpu_milli_percent / 10;
-            
+
             let is_selected = Some(i) == selected_idx;
             let mut style = Style::default();
-            
+
             if is_selected && is_focused {
                 style = style.fg(palette.header_bg).bg(palette.accent);
             } else if is_selected {
@@ -324,10 +262,10 @@ fn render_files(
 ) {
     let count = app.discovered_files.len();
     let title = format!("📁  Active Files ({})", count);
-    
+
     let mut title_style = Style::default();
     let mut border_style = Style::default();
-    
+
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
         title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
@@ -360,7 +298,10 @@ fn render_files(
         let name = truncate(&filename, 30);
         let age = elapsed_pretty(f.modified);
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<30} ", name), Style::default().fg(palette.header_fg)),
+            Span::styled(
+                format!("{:<30} ", name),
+                Style::default().fg(palette.header_fg),
+            ),
             Span::styled(age, Style::default().fg(palette.muted)),
         ]));
     }
@@ -382,15 +323,21 @@ fn render_system_summary(
 
     if let Some(system) = app.system.latest.as_ref() {
         let mem_pct = system.memory_usage_percent();
-        
+
         let cpu_line = Line::from(vec![
             Span::styled("CPU: ", Style::default().fg(palette.cpu_color)),
-            Span::styled(format!("{:.1}%", system.cpu_usage), Style::default().fg(palette.header_fg)),
+            Span::styled(
+                format!("{:.1}%", system.cpu_usage),
+                Style::default().fg(palette.header_fg),
+            ),
         ]);
 
         let ram_line = Line::from(vec![
             Span::styled("RAM: ", Style::default().fg(palette.ram_color)),
-            Span::styled(format!("{:.1}%", mem_pct), Style::default().fg(palette.header_fg)),
+            Span::styled(
+                format!("{:.1}%", mem_pct),
+                Style::default().fg(palette.header_fg),
+            ),
         ]);
 
         let mut lines = vec![cpu_line, ram_line];
@@ -399,8 +346,22 @@ fn render_system_summary(
             lines.push(Line::from(""));
             for (i, gpu) in system.gpus.iter().enumerate() {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("GPU {}: ", i), Style::default().fg(palette.gpu_color)),
-                    Span::styled(format!("{:.1}% util, {:.1}% mem", gpu.utilization, if gpu.memory_total > 0 { (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0 } else { 0.0 }), Style::default().fg(palette.header_fg)),
+                    Span::styled(
+                        format!("GPU {}: ", i),
+                        Style::default().fg(palette.gpu_color),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{:.1}% util, {:.1}% mem",
+                            gpu.utilization,
+                            if gpu.memory_total > 0 {
+                                (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0
+                            } else {
+                                0.0
+                            }
+                        ),
+                        Style::default().fg(palette.header_fg),
+                    ),
                 ]));
             }
         }
@@ -425,7 +386,7 @@ fn render_alerts(
 ) {
     let mut title_style = Style::default();
     let mut border_style = Style::default();
-    
+
     if is_focused {
         border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
         title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
@@ -457,17 +418,26 @@ fn render_alerts(
             crate::app::AlertLevel::Warning => ("WARN", palette.warning),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{prefix} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{prefix} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(&alert.message, Style::default().fg(color)),
         ]));
     }
 
     if !app.alerts.active.is_empty() && !app.alerts.resolved.is_empty() {
-        lines.push(Line::from(Span::styled("--- resolved ---", Style::default().fg(palette.muted))));
+        lines.push(Line::from(Span::styled(
+            "--- resolved ---",
+            Style::default().fg(palette.muted),
+        )));
     }
 
     for alert in app.alerts.resolved.iter().rev().take(3) {
-        lines.push(Line::from(Span::styled(&alert.message, Style::default().fg(palette.muted))));
+        lines.push(Line::from(Span::styled(
+            &alert.message,
+            Style::default().fg(palette.muted),
+        )));
     }
 
     let paragraph = Paragraph::new(lines).block(block);
@@ -486,59 +456,6 @@ fn elapsed_pretty(modified: SystemTime) -> String {
     } else {
         format!("{}h ago", duration / 3600)
     }
-}
-
-fn format_epoch_date(secs: i64) -> String {
-    let dt = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
-    let sys_time = dt
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let days = sys_time / 86400;
-
-    let mut d = days;
-    let mut y = 1970;
-    loop {
-        let leap = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            1
-        } else {
-            0
-        };
-        let days_in_year = 365 + leap;
-        if d < days_in_year {
-            break;
-        }
-        d -= days_in_year;
-        y += 1;
-    }
-
-    let leap = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-        1
-    } else {
-        0
-    };
-    let month_days = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-
-    let mut m = 0;
-    for (i, &md) in month_days.iter().enumerate() {
-        if d < md {
-            m = i;
-            break;
-        }
-        d -= md;
-    }
-
-    let day = d + 1;
-
-    let seconds_in_day = sys_time % 86400;
-    let hours = seconds_in_day / 3600;
-    let minutes = (seconds_in_day % 3600) / 60;
-
-    format!("{} {:02} {:02}:{:02}", month_names[m], day, hours, minutes)
 }
 
 fn format_step(step: u64) -> String {

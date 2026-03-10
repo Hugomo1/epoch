@@ -2,26 +2,46 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, HighlightSpacing, Paragraph, Row, Table, TableState};
 
 use crate::app::App;
 use crate::store::types::RunStatus;
 use crate::ui::components::{format_epoch_date, format_step, truncate};
 use crate::ui::theme::{ThemePalette, resolve_palette_from_config};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render_runs_panel(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
     let palette = resolve_palette_from_config(&app.config);
     let state = &app.ui_state.explorer;
 
+    let mut title_style = Style::default();
+    let mut border_style = Style::default();
+
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else {
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
+
+    let block = Block::default()
+        .title("Runs")
+        .title_style(title_style)
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
     let chunks = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(3),
+        Constraint::Length(1),
     ])
-    .split(area);
+    .split(inner_area);
 
     render_filter_bar(frame, chunks[0], state, &palette);
-    render_run_table(frame, chunks[1], state, &palette);
+    render_run_table(frame, chunks[1], state, &palette, is_focused);
     render_detail_strip(frame, chunks[2], state, &palette);
 }
 
@@ -59,12 +79,7 @@ fn render_filter_bar(
         count_span,
     ]);
 
-    let block = Block::default()
-        .title("Run Explorer")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.header_fg));
-
-    let p = Paragraph::new(line).block(block);
+    let p = Paragraph::new(line);
     frame.render_widget(p, area);
 }
 
@@ -73,6 +88,7 @@ fn render_run_table(
     area: Rect,
     state: &crate::app::RunExplorerUiState,
     palette: &ThemePalette,
+    is_focused: bool,
 ) {
     if state.records.is_empty() {
         let text =
@@ -90,7 +106,8 @@ fn render_run_table(
     let rows: Vec<Row> = state
         .records
         .iter()
-        .map(|rec| {
+        .enumerate()
+        .map(|(i, rec)| {
             let (status_icon, status_color) = match rec.status {
                 RunStatus::Active => ("●", palette.success),
                 RunStatus::Completed => ("✓", palette.muted),
@@ -110,13 +127,32 @@ fn render_run_table(
             let started = format_epoch_date(rec.started_at_epoch_secs);
             let source = rec.source_kind.as_str();
 
+            let is_selected = i == state.selected_idx;
+            let mut style = Style::default();
+
+            if is_selected && is_focused {
+                style = style.fg(palette.header_bg).bg(palette.accent);
+            } else if is_selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            } else {
+                style = style.fg(palette.header_fg);
+            }
+
             Row::new(vec![
-                Line::from(Span::styled(status_icon, Style::default().fg(status_color))),
+                Line::from(Span::styled(
+                    status_icon,
+                    Style::default().fg(if is_selected {
+                        style.fg.unwrap_or(status_color)
+                    } else {
+                        status_color
+                    }),
+                )),
                 Line::from(name),
                 Line::from(step),
                 Line::from(started),
                 Line::from(source.to_string()),
             ])
+            .style(style)
         })
         .collect();
 
@@ -131,12 +167,7 @@ fn render_run_table(
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::default()
-            .bg(palette.header_bg)
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD),
-    );
+    .highlight_spacing(HighlightSpacing::Always);
 
     let mut table_state = TableState::default();
     table_state.select(Some(state.selected_idx));
@@ -152,13 +183,7 @@ fn render_detail_strip(
 ) {
     if state.search_active {
         let text = format!("Search: {}|", state.search_query);
-        let block = Block::default()
-            .title("Search")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.accent));
-        let p = Paragraph::new(text)
-            .block(block)
-            .style(Style::default().fg(palette.accent));
+        let p = Paragraph::new(text).style(Style::default().fg(palette.accent));
         frame.render_widget(p, area);
     } else if !state.records.is_empty() && state.selected_idx < state.records.len() {
         let rec = &state.records[state.selected_idx];
@@ -170,23 +195,11 @@ fn render_detail_strip(
         };
         let text = format!("  {}   |   Run ID: {}", loc, id_trunc);
 
-        let block = Block::default()
-            .title("Detail")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.muted));
-        let p = Paragraph::new(text)
-            .block(block)
-            .style(Style::default().fg(palette.muted));
+        let p = Paragraph::new(text).style(Style::default().fg(palette.muted));
         frame.render_widget(p, area);
     } else {
         let text = "  /: search   f: filter status   Enter: open active run";
-        let block = Block::default()
-            .title("Hint")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.muted));
-        let p = Paragraph::new(text)
-            .block(block)
-            .style(Style::default().fg(palette.muted));
+        let p = Paragraph::new(text).style(Style::default().fg(palette.muted));
         frame.render_widget(p, area);
     }
 }
@@ -209,7 +222,7 @@ mod tests {
         let mut terminal = make_terminal();
         terminal
             .draw(|frame| {
-                render(frame, frame.area(), &app);
+                render_runs_panel(frame, frame.area(), &app, true);
             })
             .unwrap();
 
@@ -245,7 +258,7 @@ mod tests {
         let mut terminal = make_terminal();
         terminal
             .draw(|frame| {
-                render(frame, frame.area(), &app);
+                render_runs_panel(frame, frame.area(), &app, true);
             })
             .unwrap();
 
@@ -271,7 +284,7 @@ mod tests {
         let mut terminal = make_terminal();
         terminal
             .draw(|frame| {
-                render(frame, frame.area(), &app);
+                render_runs_panel(frame, frame.area(), &app, true);
             })
             .unwrap();
 
