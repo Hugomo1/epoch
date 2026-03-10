@@ -67,13 +67,27 @@ async fn main() -> Result<()> {
         }
 
         if !config.stdin_mode && config.log_file.is_none() {
-            app.ui_state.mode = epoch::app::AppMode::Scanning;
+            app.ui_state.primary_view = epoch::app::PrimaryView::Home;
         }
+        app.project_root = project_root.clone();
 
         let (event_tx, mut event_rx) = mpsc::channel(epoch::event::EVENT_CHANNEL_CAPACITY);
         let (metrics_tx, mut metrics_rx) = mpsc::channel(epoch::event::METRICS_CHANNEL_CAPACITY);
         let (system_tx, mut system_rx) = mpsc::channel(epoch::event::SYSTEM_CHANNEL_CAPACITY);
         let (process_tx, mut process_rx) = mpsc::channel(8);
+        let (discovery_tx, mut discovery_rx) =
+            mpsc::channel::<Vec<epoch::discovery::DiscoveredFile>>(2);
+        {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            tokio::spawn(async move {
+                let files = tokio::task::spawn_blocking(move || {
+                    epoch::discovery::discover_training_files(&cwd).unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let _ = discovery_tx.send(files).await;
+            });
+        }
 
         let _event_handle = epoch::event::spawn_event_reader(event_tx.clone());
         let _tick_handle =
@@ -94,11 +108,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        let run_store = global_store_path().and_then(|path| RunStore::open(&path).ok());
+        if let Some(store) = global_store_path().and_then(|path| RunStore::open(&path).ok()) {
+            app.set_store(store);
+        }
         let mut active_run_id: Option<String> = None;
 
         if config.stdin_mode {
-            if let Some(store) = run_store.as_ref() {
+            if let Some(store) = app.run_store.as_ref() {
                 let cwd = std::env::current_dir()
                     .ok()
                     .map(|path| path.to_string_lossy().to_string());
@@ -123,7 +139,7 @@ async fn main() -> Result<()> {
                 }
             }
         } else if let Some(path) = config.log_file.as_ref()
-            && let Some(store) = run_store.as_ref()
+            && let Some(store) = app.run_store.as_ref()
         {
             let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             let source_locator = canonical.to_string_lossy().to_string();
@@ -161,7 +177,7 @@ async fn main() -> Result<()> {
         }
 
         if !app.running {
-            if let (Some(store), Some(run_id)) = (run_store.as_ref(), active_run_id.as_deref()) {
+            if let (Some(store), Some(run_id)) = (app.run_store.as_ref(), active_run_id.as_deref()) {
                 let _ = store.complete_run(run_id, RunStatus::Completed);
             }
             return Ok(());
@@ -191,17 +207,18 @@ async fn main() -> Result<()> {
                 Some(metrics) = metrics_rx.recv() => {
                     let step = metrics.step;
                     app.push_metrics(metrics);
-                    if let (Some(store), Some(run_id), Some(step)) = (run_store.as_ref(), active_run_id.as_deref(), step) {
+                    if let (Some(store), Some(run_id), Some(step)) = (app.run_store.as_ref(), active_run_id.as_deref(), step) {
                         let _ = store.update_last_step(run_id, step);
                     }
                 },
                 Some(system) = system_rx.recv() => app.push_system(system),
-                Some(processes) = process_rx.recv() => app.discovered_processes = processes,
+                Some(files) = discovery_rx.recv() => { app.set_discovered_files(files); },
+                Some(processes) = process_rx.recv() => app.set_discovered_processes(processes),
                 _ = tokio::signal::ctrl_c() => app.running = false,
             }
         }
 
-        if let (Some(store), Some(run_id)) = (run_store.as_ref(), active_run_id.as_deref()) {
+        if let (Some(store), Some(run_id)) = (app.run_store.as_ref(), active_run_id.as_deref()) {
             let _ = store.complete_run(run_id, RunStatus::Completed);
         }
 
