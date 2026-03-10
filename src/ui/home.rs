@@ -2,28 +2,20 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, HighlightSpacing};
 use std::time::SystemTime;
 
-use crate::app::App;
+use crate::app::{App, HomeFocusTarget};
 use crate::ui::components::truncate;
 use crate::ui::theme::resolve_palette_from_config;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = resolve_palette_from_config(&app.config);
 
-    let vertical_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(area);
-
-    let main_area = vertical_chunks[0];
-    let alert_area = vertical_chunks[1];
-
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(main_area);
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
 
     let left_col = horizontal_chunks[0];
     let right_col = horizontal_chunks[1];
@@ -31,37 +23,45 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let left_col_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
-            Constraint::Min(0),
-            Constraint::Length(5),
+            Constraint::Length(7),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
         ])
         .split(left_col);
 
-    let active_run_box = left_col_chunks[0];
-    let process_box = left_col_chunks[1];
-    let files_box = left_col_chunks[2];
-
     let right_col_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(8),
+            Constraint::Percentage(60),
+        ])
         .split(right_col);
 
-    let recent_runs_area = right_col_chunks[0];
-    let quick_actions_area = right_col_chunks[1];
+    let overview_area = left_col_chunks[0];
+    let runs_area = left_col_chunks[1];
+    let processes_area = left_col_chunks[2];
 
-    render_active_run(frame, active_run_box, app, &palette);
-    render_processes(frame, process_box, app, &palette);
-    render_files(frame, files_box, app, &palette);
-    render_recent_runs(frame, recent_runs_area, app, &palette);
-    render_quick_actions(frame, quick_actions_area, app, &palette);
-    render_alerts(frame, alert_area, app, &palette);
+    let files_area = right_col_chunks[0];
+    let system_area = right_col_chunks[1];
+    let alerts_area = right_col_chunks[2];
+
+    let focus = &app.ui_state.monitoring.home_focus;
+
+    render_overview(frame, overview_area, app, &palette, *focus == HomeFocusTarget::Overview);
+    render_runs(frame, runs_area, app, &palette, *focus == HomeFocusTarget::Runs);
+    render_processes(frame, processes_area, app, &palette, *focus == HomeFocusTarget::Processes);
+    render_files(frame, files_area, app, &palette, *focus == HomeFocusTarget::Files);
+    render_system_summary(frame, system_area, app, &palette);
+    render_alerts(frame, alerts_area, app, &palette, *focus == HomeFocusTarget::Alerts);
 }
 
-fn render_active_run(
+fn render_overview(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     palette: &crate::ui::theme::ThemePalette,
+    is_focused: bool,
 ) {
     let has_active = app.training.latest.is_some();
 
@@ -70,16 +70,26 @@ fn render_active_run(
     } else {
         "○  No Active Run"
     };
-    let border_color = if has_active {
-        palette.success
+    
+    let mut border_style = Style::default();
+    let mut title_style = Style::default();
+    
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else if has_active {
+        border_style = border_style.fg(palette.success);
+        title_style = title_style.fg(palette.header_fg);
     } else {
-        palette.muted
-    };
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
 
     let block = Block::default()
         .title(title)
+        .title_style(title_style)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_style(border_style);
 
     if let Some(latest) = &app.training.latest {
         let step = latest
@@ -90,11 +100,16 @@ fn render_active_run(
             .loss
             .map(|v| format!("{:.4}", v))
             .unwrap_or_else(|| "N/A".to_string());
+            
+        let lr = latest
+            .learning_rate
+            .map(|v| format!("{:.2e}", v))
+            .unwrap_or_else(|| "N/A".to_string());
 
         let content = vec![
-            Line::from(format!("Step: {:<8} Loss: {}", step, loss)),
+            Line::from(format!("Step: {:<8} Loss: {:<8} LR: {}", step, loss, lr)),
             Line::from(Span::styled(
-                "[→ Tab or 2 for Live Run]",
+                if is_focused { "[Press Enter to view Live Metrics]" } else { "" },
                 Style::default().fg(palette.muted),
             )),
         ];
@@ -112,103 +127,32 @@ fn render_active_run(
     }
 }
 
-fn render_processes(
+fn render_runs(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     palette: &crate::ui::theme::ThemePalette,
+    is_focused: bool,
 ) {
-    let count = app.discovered_processes.len();
-    let title = format!("⚡  Processes ({})", count);
-    let border_color = if count > 0 {
-        palette.warning
+    let mut title_style = Style::default();
+    let mut border_style = Style::default();
+    
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
     } else {
-        palette.muted
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-
-    if count == 0 {
-        let paragraph = Paragraph::new("No training processes detected")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-        return;
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
     }
 
-    let mut lines = Vec::new();
-    for p in app.discovered_processes.iter().take(4) {
-        let cmd = truncate(&p.command, 25);
-        let cpu = p.cpu_milli_percent / 10;
-        lines.push(Line::from(format!(" {:<7} {:<25} {}%", p.pid, cmd, cpu)));
-    }
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .style(Style::default().fg(palette.header_fg));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_files(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-) {
-    let count = app.discovered_files.len();
-    let title = format!("📁  Active Files ({})", count);
-    let border_color = if count > 0 {
-        palette.accent
-    } else {
-        palette.muted
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-
-    if count == 0 {
-        let paragraph = Paragraph::new("No training files detected")
-            .block(block)
-            .style(Style::default().fg(palette.muted))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let mut lines = Vec::new();
-    for f in app.discovered_files.iter().take(3) {
-        let filename = f.path.file_name().unwrap_or_default().to_string_lossy();
-        let name = truncate(&filename, 25);
-        let age = elapsed_pretty(f.modified);
-        lines.push(Line::from(format!(" {:<25} {}", name, age)));
-    }
-
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .style(Style::default().fg(palette.header_fg));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_recent_runs(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-) {
     let block = Block::default()
         .title("Recent Runs")
+        .title_style(title_style)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.header_fg));
+        .border_style(border_style);
 
     if app.recent_runs.is_empty() {
-        let content =
-            "No runs recorded yet.\nRun epoch with a training log to record your first run.";
+        let content = "No runs recorded yet.\nRun epoch with a training log to record your first run.";
         let paragraph = Paragraph::new(content)
             .block(block)
             .style(Style::default().fg(palette.muted))
@@ -217,14 +161,21 @@ fn render_recent_runs(
         return;
     }
 
+    let selected_idx = app
+        .ui_state
+        .monitoring
+        .selected_run_id
+        .as_ref()
+        .and_then(|id| app.recent_runs.iter().position(|r| &r.run_id == id));
+
     let header = Row::new(vec!["St", "Name", "Step", "Date"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+        .style(Style::default().fg(palette.header_fg).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = app
         .recent_runs
         .iter()
-        .take(5)
-        .map(|run| {
+        .enumerate()
+        .map(|(i, run)| {
             let (icon, icon_color) = match run.status {
                 crate::store::types::RunStatus::Active => ("●", palette.success),
                 crate::store::types::RunStatus::Completed => ("✓", palette.muted),
@@ -238,18 +189,30 @@ fn render_recent_runs(
                 .unwrap_or_else(|| "-".to_string());
             let date = format_epoch_date(run.started_at_epoch_secs);
 
+            let is_selected = Some(i) == selected_idx;
+            let mut style = Style::default();
+            
+            if is_selected && is_focused {
+                style = style.fg(palette.header_bg).bg(palette.accent);
+            } else if is_selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            } else {
+                style = style.fg(palette.header_fg);
+            }
+
             Row::new(vec![
-                Line::from(Span::styled(icon, Style::default().fg(icon_color))),
+                Line::from(Span::styled(icon, Style::default().fg(if is_selected { style.fg.unwrap_or(icon_color) } else { icon_color }))),
                 Line::from(name),
                 Line::from(step),
                 Line::from(date),
             ])
+            .style(style)
         })
         .collect();
 
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(18),
+        Constraint::Min(10),
         Constraint::Length(8),
         Constraint::Length(12),
     ];
@@ -257,37 +220,148 @@ fn render_recent_runs(
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .style(Style::default().fg(palette.header_fg));
+        .highlight_spacing(HighlightSpacing::Always);
 
     frame.render_widget(table, area);
 }
 
-fn render_quick_actions(
+fn render_processes(
     frame: &mut Frame,
     area: Rect,
-    _app: &App,
+    app: &App,
     palette: &crate::ui::theme::ThemePalette,
+    is_focused: bool,
 ) {
-    let block = Block::default()
-        .title("Quick Actions")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.header_fg));
+    let count = app.discovered_processes.len();
+    let title = format!("⚡  Processes ({})", count);
+    
+    let mut title_style = Style::default();
+    let mut border_style = Style::default();
+    
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else if count > 0 {
+        border_style = border_style.fg(palette.warning);
+        title_style = title_style.fg(palette.header_fg);
+    } else {
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
 
-    let actions = [
-        ("o", "Open file..."),
-        ("a", "Attach to process"),
-        ("e", "Explore all runs"),
-        ("s", "Scan directory"),
-        ("r", "Refresh"),
+    let block = Block::default()
+        .title(title)
+        .title_style(title_style)
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    if count == 0 {
+        let paragraph = Paragraph::new("No training processes detected")
+            .block(block)
+            .style(Style::default().fg(palette.muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let selected_idx = app
+        .ui_state
+        .monitoring
+        .selected_pid
+        .and_then(|pid| app.discovered_processes.iter().position(|p| p.pid == pid));
+
+    let header = Row::new(vec!["PID", "Command", "CPU%"])
+        .style(Style::default().fg(palette.header_fg).add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = app
+        .discovered_processes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let cmd = truncate(&p.command, 25);
+            let cpu = p.cpu_milli_percent / 10;
+            
+            let is_selected = Some(i) == selected_idx;
+            let mut style = Style::default();
+            
+            if is_selected && is_focused {
+                style = style.fg(palette.header_bg).bg(palette.accent);
+            } else if is_selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            } else {
+                style = style.fg(palette.header_fg);
+            }
+
+            Row::new(vec![
+                Line::from(format!("{}", p.pid)),
+                Line::from(cmd),
+                Line::from(format!("{}%", cpu)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Min(10),
+        Constraint::Length(6),
     ];
 
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .highlight_spacing(HighlightSpacing::Always);
+
+    frame.render_widget(table, area);
+}
+
+fn render_files(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    palette: &crate::ui::theme::ThemePalette,
+    is_focused: bool,
+) {
+    let count = app.discovered_files.len();
+    let title = format!("📁  Active Files ({})", count);
+    
+    let mut title_style = Style::default();
+    let mut border_style = Style::default();
+    
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else if count > 0 {
+        border_style = border_style.fg(palette.accent);
+        title_style = title_style.fg(palette.header_fg);
+    } else {
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
+
+    let block = Block::default()
+        .title(title)
+        .title_style(title_style)
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    if count == 0 {
+        let paragraph = Paragraph::new("No training files detected")
+            .block(block)
+            .style(Style::default().fg(palette.muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let mut lines = Vec::new();
-    for (key, desc) in actions {
+    for f in app.discovered_files.iter().take(8) {
+        let filename = f.path.file_name().unwrap_or_default().to_string_lossy();
+        let name = truncate(&filename, 30);
+        let age = elapsed_pretty(f.modified);
         lines.push(Line::from(vec![
-            Span::raw(" ["),
-            Span::styled(key, Style::default().fg(palette.accent)),
-            Span::raw("]  "),
-            Span::styled(desc, Style::default().fg(palette.header_fg)),
+            Span::styled(format!("{:<30} ", name), Style::default().fg(palette.header_fg)),
+            Span::styled(age, Style::default().fg(palette.muted)),
         ]));
     }
 
@@ -295,27 +369,109 @@ fn render_quick_actions(
     frame.render_widget(paragraph, area);
 }
 
-fn render_alerts(
+fn render_system_summary(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     palette: &crate::ui::theme::ThemePalette,
 ) {
-    if app.alerts.active.is_empty() {
-        let line = Line::from(Span::styled(
-            "  ✓  No alerts",
-            Style::default().fg(palette.success),
-        ));
-        let paragraph = Paragraph::new(vec![line]).style(Style::default().fg(palette.success));
+    let block = Block::default()
+        .title("System Summary")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.muted));
+
+    if let Some(system) = app.system.latest.as_ref() {
+        let mem_pct = system.memory_usage_percent();
+        
+        let cpu_line = Line::from(vec![
+            Span::styled("CPU: ", Style::default().fg(palette.cpu_color)),
+            Span::styled(format!("{:.1}%", system.cpu_usage), Style::default().fg(palette.header_fg)),
+        ]);
+
+        let ram_line = Line::from(vec![
+            Span::styled("RAM: ", Style::default().fg(palette.ram_color)),
+            Span::styled(format!("{:.1}%", mem_pct), Style::default().fg(palette.header_fg)),
+        ]);
+
+        let mut lines = vec![cpu_line, ram_line];
+
+        if !system.gpus.is_empty() {
+            lines.push(Line::from(""));
+            for (i, gpu) in system.gpus.iter().enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("GPU {}: ", i), Style::default().fg(palette.gpu_color)),
+                    Span::styled(format!("{:.1}% util, {:.1}% mem", gpu.utilization, if gpu.memory_total > 0 { (gpu.memory_used as f64 / gpu.memory_total as f64) * 100.0 } else { 0.0 }), Style::default().fg(palette.header_fg)),
+                ]));
+            }
+        }
+
+        let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, area);
     } else {
-        let count = app.alerts.active.len();
-        let first_msg = truncate(&app.alerts.active[0].message, 60);
-        let text = format!("  ⚠  {} alert(s): {}", count, first_msg);
-        let line = Line::from(Span::styled(text, Style::default().fg(palette.error)));
-        let paragraph = Paragraph::new(vec![line]).style(Style::default().fg(palette.error));
+        let paragraph = Paragraph::new("No system metrics available")
+            .block(block)
+            .style(Style::default().fg(palette.muted))
+            .alignment(Alignment::Center);
         frame.render_widget(paragraph, area);
     }
+}
+
+fn render_alerts(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    palette: &crate::ui::theme::ThemePalette,
+    is_focused: bool,
+) {
+    let mut title_style = Style::default();
+    let mut border_style = Style::default();
+    
+    if is_focused {
+        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
+    } else {
+        border_style = border_style.fg(palette.muted);
+        title_style = title_style.fg(palette.header_fg);
+    }
+
+    let block = Block::default()
+        .title("Alerts")
+        .title_style(title_style)
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
+        let empty = Paragraph::new("  ✓  No alerts")
+            .alignment(Alignment::Left)
+            .block(block)
+            .style(Style::default().fg(palette.success));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for alert in app.alerts.active.iter().take(5) {
+        let (prefix, color) = match alert.level {
+            crate::app::AlertLevel::Critical => ("CRIT", palette.error),
+            crate::app::AlertLevel::Warning => ("WARN", palette.warning),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(&alert.message, Style::default().fg(color)),
+        ]));
+    }
+
+    if !app.alerts.active.is_empty() && !app.alerts.resolved.is_empty() {
+        lines.push(Line::from(Span::styled("--- resolved ---", Style::default().fg(palette.muted))));
+    }
+
+    for alert in app.alerts.resolved.iter().rev().take(3) {
+        lines.push(Line::from(Span::styled(&alert.message, Style::default().fg(palette.muted))));
+    }
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn elapsed_pretty(modified: SystemTime) -> String {
