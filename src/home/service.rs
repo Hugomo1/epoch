@@ -85,6 +85,20 @@ pub fn default_actions() -> Vec<HomeAction> {
     ]
 }
 
+/// Home view sections - data that defines the home view structure.
+/// This belongs in core/home rather than UI to allow tests to verify
+/// the expected sections without coupling to UI implementation.
+pub fn home_sections() -> Vec<&'static str> {
+    vec![
+        "Active Runs",
+        "Recent Runs",
+        "Recent Projects",
+        "Alerts Needing Attention",
+        "Available Checkpoints",
+        "Discovered Processes",
+    ]
+}
+
 pub fn load_cached_snapshot(path: &Path) -> Option<HomeSnapshot> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str::<HomeSnapshot>(&text).ok()
