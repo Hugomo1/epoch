@@ -13,6 +13,12 @@ use crate::discovery::DiscoveredFile;
 use crate::event::Event;
 use crate::types::{SystemMetrics, TrainingMetrics};
 
+impl std::fmt::Debug for crate::store::repository::RunStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunStore").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub struct TrainingState {
     pub latest: Option<TrainingMetrics>,
@@ -77,6 +83,15 @@ pub struct SystemState {
     pub gpu_history: VecDeque<u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RunExplorerUiState {
+    pub records: Vec<crate::store::types::RunRecord>,
+    pub selected_idx: usize,
+    pub search_query: String,
+    pub search_active: bool,
+    pub status_filter: Option<crate::store::types::RunStatus>,
+}
+
 #[derive(Debug)]
 pub struct UiState {
     pub primary_view: PrimaryView,
@@ -86,6 +101,8 @@ pub struct UiState {
     pub scanning_frame: usize,
     pub graph_viewports: [ViewportState; 4],
     pub system_viewport: ViewportState,
+    pub explorer: RunExplorerUiState,
+    pub selected_process_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,19 +110,17 @@ pub enum PrimaryView {
     Home,
     LiveRun,
     RunExplorer,
-    EventsNotes,
     SystemProcesses,
 }
 
 impl PrimaryView {
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 4;
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
             Self::LiveRun => "Live Run",
             Self::RunExplorer => "Run Explorer",
-            Self::EventsNotes => "Events/Notes",
             Self::SystemProcesses => "System/Processes",
         }
     }
@@ -115,8 +130,7 @@ impl PrimaryView {
             Self::Home => 0,
             Self::LiveRun => 1,
             Self::RunExplorer => 2,
-            Self::EventsNotes => 3,
-            Self::SystemProcesses => 4,
+            Self::SystemProcesses => 3,
         }
     }
 
@@ -125,8 +139,7 @@ impl PrimaryView {
             0 => Self::Home,
             1 => Self::LiveRun,
             2 => Self::RunExplorer,
-            3 => Self::EventsNotes,
-            4 => Self::SystemProcesses,
+            3 => Self::SystemProcesses,
             _ => Self::Home,
         }
     }
@@ -436,6 +449,20 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
         ("?".to_string(), "Toggle help overlay".to_string()),
     ];
 
+    entries.push(("Home: o".to_string(), "Open file picker".to_string()));
+    entries.push(("Home: a".to_string(), "Attach to process".to_string()));
+    entries.push(("Home: e".to_string(), "Explore all runs".to_string()));
+    entries.push(("Home: s".to_string(), "Scan directory".to_string()));
+    entries.push(("Home: r".to_string(), "Refresh run list".to_string()));
+    entries.push(("Explorer: j/k".to_string(), "Move cursor".to_string()));
+    entries.push(("Explorer: /".to_string(), "Search runs".to_string()));
+    entries.push(("Explorer: f".to_string(), "Cycle status filter".to_string()));
+    entries.push(("Explorer: Enter".to_string(), "Open active run".to_string()));
+    entries.push(("Explorer: r".to_string(), "Refresh".to_string()));
+    entries.push(("Processes: j/k".to_string(), "Move cursor".to_string()));
+    entries.push(("Processes: a".to_string(), "Attach to process".to_string()));
+    entries.push(("Processes: r".to_string(), "Refresh".to_string()));
+
     if profile == "vim" {
         entries.push(("j/k".to_string(), "Switch view (vim)".to_string()));
         entries.push(("h/l".to_string(), "Pan history (vim)".to_string()));
@@ -520,6 +547,10 @@ pub struct App {
     pub alerts: AlertsState,
     pub run_comparison: RunComparisonState,
     pub config: Config,
+    pub run_store: Option<crate::store::repository::RunStore>,
+    pub project_root: Option<std::path::PathBuf>,
+    pub recent_runs: Vec<crate::store::types::RunRecord>,
+    pub discovered_files: Vec<crate::discovery::DiscoveredFile>,
 }
 
 impl App {
@@ -574,10 +605,16 @@ impl App {
                 scanning_frame: 0,
                 graph_viewports: [ViewportState::default(); 4],
                 system_viewport: ViewportState::default(),
+                explorer: RunExplorerUiState::default(),
+                selected_process_idx: 0,
             },
             alerts: AlertsState::default(),
             run_comparison: RunComparisonState::default(),
             config,
+            run_store: None,
+            project_root: None,
+            recent_runs: Vec::new(),
+            discovered_files: Vec::new(),
         }
     }
 
@@ -601,6 +638,69 @@ impl App {
 
     pub fn preferred_rate_metric_id(&self) -> &'static str {
         self.training.preferred_rate_metric.metric_id()
+    }
+
+    pub fn set_store(&mut self, store: crate::store::repository::RunStore) {
+        self.run_store = Some(store);
+        self.load_recent_runs();
+        self.refresh_explorer_records();
+    }
+
+    pub fn load_recent_runs(&mut self) {
+        if let Some(store) = &self.run_store {
+            self.recent_runs = store.list_recent_runs(5).unwrap_or_default();
+        }
+    }
+
+    pub fn refresh_explorer_records(&mut self) {
+        if let Some(store) = &self.run_store {
+            let status_str = self
+                .ui_state
+                .explorer
+                .status_filter
+                .as_ref()
+                .map(|s| s.as_str());
+            let query = if self.ui_state.explorer.search_query.is_empty() {
+                None
+            } else {
+                Some(self.ui_state.explorer.search_query.as_str())
+            };
+            self.ui_state.explorer.records =
+                store.list_runs(status_str, query, 100).unwrap_or_default();
+            let max_idx = self.ui_state.explorer.records.len().saturating_sub(1);
+            self.ui_state.explorer.selected_idx = self.ui_state.explorer.selected_idx.min(max_idx);
+        }
+    }
+
+    pub fn set_discovered_files(&mut self, files: Vec<crate::discovery::DiscoveredFile>) {
+        self.discovered_files = files;
+    }
+
+    pub fn set_discovered_processes(
+        &mut self,
+        processes: Vec<crate::collectors::process::ProcessCandidate>,
+    ) {
+        self.discovered_processes = processes;
+        let max_idx = self.discovered_processes.len().saturating_sub(1);
+        self.ui_state.selected_process_idx = self.ui_state.selected_process_idx.min(max_idx);
+    }
+
+    fn attach_process_and_switch(
+        &mut self,
+        candidate: &crate::collectors::process::ProcessCandidate,
+    ) {
+        if let Some(store) = &self.run_store {
+            let project_root_str = self
+                .project_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+            let _ = crate::home::service::attach_to_discovered_process(
+                store,
+                candidate,
+                project_root_str.as_deref(),
+            );
+        }
+        self.ui_state.primary_view = PrimaryView::LiveRun;
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -806,6 +906,7 @@ impl App {
             return;
         }
 
+        // Global commands (work in any view)
         match (key.code, key.modifiers) {
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 self.ui_state.mode =
@@ -813,33 +914,6 @@ impl App {
             }
             _ if is_help_key => {
                 self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
-            }
-            (KeyCode::Char('j'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let next = (self.ui_state.primary_view.index() + 1) % PrimaryView::COUNT;
-                self.ui_state.primary_view = PrimaryView::from_index(next);
-            }
-            (KeyCode::Char('k'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let current = self.ui_state.primary_view.index();
-                let next = if current == 0 {
-                    PrimaryView::COUNT - 1
-                } else {
-                    current - 1
-                };
-                self.ui_state.primary_view = PrimaryView::from_index(next);
-            }
-            (KeyCode::Char('h'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let vp =
-                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
-                if !vp.follow_latest && vp.zoom_level > 0 {
-                    vp.offset_samples = vp.offset_samples.saturating_add(Self::VIEWPORT_PAN_STEP);
-                }
-            }
-            (KeyCode::Char('l'), KeyModifiers::NONE) if self.config.keymap_profile == "vim" => {
-                let vp =
-                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
-                if !vp.follow_latest && vp.zoom_level > 0 {
-                    vp.offset_samples = vp.offset_samples.saturating_sub(Self::VIEWPORT_PAN_STEP);
-                }
             }
             (KeyCode::Tab, _) => {
                 let next = (self.ui_state.primary_view.index() + 1) % PrimaryView::COUNT;
@@ -854,10 +928,6 @@ impl App {
                 };
                 self.ui_state.primary_view = PrimaryView::from_index(next);
             }
-            (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
-                let idx = c as u8 - b'0';
-                self.ui_state.focused_box = idx;
-            }
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 let follow_latest = !self.ui_state.graph_viewports[0].follow_latest;
                 for vp in &mut self.ui_state.graph_viewports {
@@ -871,20 +941,6 @@ impl App {
                     self.ui_state.system_viewport.offset_samples = 0;
                 }
             }
-            (KeyCode::Left, KeyModifiers::NONE) => {
-                let vp =
-                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
-                if !vp.follow_latest && vp.zoom_level > 0 {
-                    vp.offset_samples = vp.offset_samples.saturating_add(Self::VIEWPORT_PAN_STEP);
-                }
-            }
-            (KeyCode::Right, KeyModifiers::NONE) => {
-                let vp =
-                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
-                if !vp.follow_latest && vp.zoom_level > 0 {
-                    vp.offset_samples = vp.offset_samples.saturating_sub(Self::VIEWPORT_PAN_STEP);
-                }
-            }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 for vp in &mut self.ui_state.graph_viewports {
                     vp.follow_latest = true;
@@ -895,6 +951,26 @@ impl App {
                 self.ui_state.system_viewport.offset_samples = 0;
                 self.ui_state.system_viewport.zoom_level = 0;
             }
+            _ => {
+                // Tab-specific commands
+                match self.ui_state.primary_view {
+                    PrimaryView::LiveRun => self.handle_key_live_run(key),
+                    PrimaryView::Home => self.handle_key_home(key),
+                    PrimaryView::RunExplorer => self.handle_key_run_explorer(key),
+                    PrimaryView::SystemProcesses => self.handle_key_system_processes(key),
+                }
+            }
+        }
+    }
+
+    fn handle_key_live_run(&mut self, key: KeyEvent) {
+        let is_vim = self.config.keymap_profile == "vim";
+        match (key.code, key.modifiers) {
+            // Box focus (tab-level)
+            (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
+                self.ui_state.focused_box = c as u8 - b'0';
+            }
+            // Zoom (box-level)
             (KeyCode::Char('-'), KeyModifiers::NONE) => {
                 let vp =
                     &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
@@ -910,6 +986,168 @@ impl App {
                     .zoom_level
                     .saturating_add(1)
                     .min(Self::VIEWPORT_MAX_ZOOM_LEVEL);
+            }
+            // Pan (box-level: arrows always, h/l in vim)
+            (KeyCode::Left, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::NONE)
+                if is_vim || matches!(key.code, KeyCode::Left) =>
+            {
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_add(Self::VIEWPORT_PAN_STEP);
+                }
+            }
+            (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('l'), KeyModifiers::NONE)
+                if is_vim || matches!(key.code, KeyCode::Right) =>
+            {
+                let vp =
+                    &mut self.ui_state.graph_viewports[(self.ui_state.focused_box - 1) as usize];
+                if !vp.follow_latest && vp.zoom_level > 0 {
+                    vp.offset_samples = vp.offset_samples.saturating_sub(Self::VIEWPORT_PAN_STEP);
+                }
+            }
+            // Focus cycling (box-level: j/k in vim, up/down always)
+            (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE)
+                if is_vim || matches!(key.code, KeyCode::Down) =>
+            {
+                let next = if self.ui_state.focused_box >= 4 {
+                    1
+                } else {
+                    self.ui_state.focused_box + 1
+                };
+                self.ui_state.focused_box = next;
+            }
+            (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE)
+                if is_vim || matches!(key.code, KeyCode::Up) =>
+            {
+                let next = if self.ui_state.focused_box <= 1 {
+                    4
+                } else {
+                    self.ui_state.focused_box - 1
+                };
+                self.ui_state.focused_box = next;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_home(&mut self, key: KeyEvent) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('o'), KeyModifiers::NONE) => {
+                self.ui_state.mode = AppMode::Scanning;
+            }
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                self.ui_state.primary_view = PrimaryView::RunExplorer;
+                self.refresh_explorer_records();
+            }
+            (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                if let Some(candidate) = self.discovered_processes.first().cloned() {
+                    self.attach_process_and_switch(&candidate);
+                }
+            }
+            (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                self.ui_state.mode = AppMode::Scanning;
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                self.load_recent_runs();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_run_explorer(&mut self, key: KeyEvent) {
+        if self.ui_state.explorer.search_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.explorer.search_active = false;
+                }
+                KeyCode::Enter => {
+                    self.ui_state.explorer.search_active = false;
+                    self.refresh_explorer_records();
+                }
+                KeyCode::Backspace => {
+                    self.ui_state.explorer.search_query.pop();
+                    self.refresh_explorer_records();
+                }
+                KeyCode::Char(c) => {
+                    self.ui_state.explorer.search_query.push(c);
+                    self.refresh_explorer_records();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                let max = self.ui_state.explorer.records.len().saturating_sub(1);
+                self.ui_state.explorer.selected_idx =
+                    (self.ui_state.explorer.selected_idx + 1).min(max);
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                self.ui_state.explorer.selected_idx =
+                    self.ui_state.explorer.selected_idx.saturating_sub(1);
+            }
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.ui_state.explorer.search_active = true;
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                use crate::store::types::RunStatus;
+                self.ui_state.explorer.status_filter = match &self.ui_state.explorer.status_filter {
+                    None => Some(RunStatus::Active),
+                    Some(RunStatus::Active) => Some(RunStatus::Completed),
+                    Some(RunStatus::Completed) => Some(RunStatus::Failed),
+                    Some(RunStatus::Failed) => None,
+                };
+                self.refresh_explorer_records();
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                self.refresh_explorer_records();
+            }
+            (KeyCode::Enter, _) => {
+                if let Some(record) = self
+                    .ui_state
+                    .explorer
+                    .records
+                    .get(self.ui_state.explorer.selected_idx)
+                {
+                    if record.status == crate::store::types::RunStatus::Active {
+                        self.ui_state.primary_view = PrimaryView::LiveRun;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_system_processes(&mut self, key: KeyEvent) {
+        let is_vim = self.config.keymap_profile == "vim";
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _)
+                if is_vim || matches!(key.code, KeyCode::Down) =>
+            {
+                let max = self.discovered_processes.len().saturating_sub(1);
+                self.ui_state.selected_process_idx =
+                    (self.ui_state.selected_process_idx + 1).min(max);
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _)
+                if is_vim || matches!(key.code, KeyCode::Up) =>
+            {
+                self.ui_state.selected_process_idx =
+                    self.ui_state.selected_process_idx.saturating_sub(1);
+            }
+            (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                if let Some(candidate) = self
+                    .discovered_processes
+                    .get(self.ui_state.selected_process_idx)
+                    .cloned()
+                {
+                    self.attach_process_and_switch(&candidate);
+                }
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                let max = self.discovered_processes.len().saturating_sub(1);
+                self.ui_state.selected_process_idx = self.ui_state.selected_process_idx.min(max);
             }
             _ => {}
         }
@@ -2148,15 +2386,18 @@ mod tests {
             ..Config::default()
         });
 
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.focused_box, 1);
+
         let idx = (app.ui_state.focused_box - 1) as usize;
         app.ui_state.graph_viewports[idx].follow_latest = false;
         app.ui_state.graph_viewports[idx].zoom_level = 1;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
+        assert_eq!(app.ui_state.focused_box, 2);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
+        assert_eq!(app.ui_state.focused_box, 1);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(
@@ -2455,13 +2696,13 @@ mod tests {
         assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
 
         app.handle_key(tab_key);
-        assert_eq!(app.ui_state.primary_view, PrimaryView::EventsNotes);
-
-        app.handle_key(tab_key);
         assert_eq!(app.ui_state.primary_view, PrimaryView::SystemProcesses);
 
         app.handle_key(tab_key);
         assert_eq!(app.ui_state.primary_view, PrimaryView::Home); // wrap
+
+        app.handle_key(tab_key);
+        assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
     }
 
     #[test]
@@ -2503,7 +2744,7 @@ mod tests {
 
     #[test]
     fn test_primary_view_count() {
-        assert_eq!(PrimaryView::COUNT, 5);
+        assert_eq!(PrimaryView::COUNT, 4);
     }
 
     #[test]
@@ -3420,5 +3661,242 @@ mod tests {
         assert_eq!(app.ui_state.primary_view, PrimaryView::LiveRun);
         assert_eq!(app.ui_state.focused_box, 1);
         assert!(app.training.latest.is_none());
+    }
+
+    #[test]
+    fn test_app_new_initializes_new_fields() {
+        let app = App::new(Config::default());
+        assert!(app.run_store.is_none());
+        assert!(app.project_root.is_none());
+        assert!(app.recent_runs.is_empty());
+        assert!(app.discovered_files.is_empty());
+        assert!(app.ui_state.explorer.records.is_empty());
+        assert_eq!(app.ui_state.explorer.selected_idx, 0);
+        assert!(!app.ui_state.explorer.search_active);
+        assert!(app.ui_state.explorer.search_query.is_empty());
+        assert!(app.ui_state.explorer.status_filter.is_none());
+        assert_eq!(app.ui_state.selected_process_idx, 0);
+    }
+
+    #[test]
+    fn test_home_key_e_switches_to_run_explorer() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::Home;
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.primary_view, PrimaryView::RunExplorer);
+    }
+
+    #[test]
+    fn test_home_key_o_enters_scanning_mode() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::Home;
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.mode, AppMode::Scanning);
+    }
+
+    #[test]
+    fn test_home_key_r_refreshes_without_store() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::Home;
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.recent_runs.is_empty());
+    }
+
+    #[test]
+    fn test_explorer_slash_activates_search() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        assert!(!app.ui_state.explorer.search_active);
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.ui_state.explorer.search_active);
+    }
+
+    #[test]
+    fn test_explorer_f_cycles_status_filter() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+
+        use crate::store::types::RunStatus;
+        assert!(app.ui_state.explorer.status_filter.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.status_filter, Some(RunStatus::Active));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(
+            app.ui_state.explorer.status_filter,
+            Some(RunStatus::Completed)
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.status_filter, Some(RunStatus::Failed));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.ui_state.explorer.status_filter.is_none());
+    }
+
+    #[test]
+    fn test_explorer_j_moves_cursor() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+
+        use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
+        let dummy_record = RunRecord {
+            run_id: "r1".to_string(),
+            source_fingerprint: "fp".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: None,
+            project_root: None,
+            display_name: None,
+            status: RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 0,
+            ended_at_epoch_secs: None,
+            last_step: None,
+            last_updated_epoch_secs: 0,
+        };
+        app.ui_state.explorer.records = vec![dummy_record.clone(), dummy_record];
+        assert_eq!(app.ui_state.explorer.selected_idx, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.selected_idx, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.selected_idx, 1);
+    }
+
+    #[test]
+    fn test_explorer_k_moves_cursor_up() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+
+        use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
+        let dummy = RunRecord {
+            run_id: "r1".to_string(),
+            source_fingerprint: "fp".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: None,
+            project_root: None,
+            display_name: None,
+            status: RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 0,
+            ended_at_epoch_secs: None,
+            last_step: None,
+            last_updated_epoch_secs: 0,
+        };
+        app.ui_state.explorer.records = vec![dummy.clone(), dummy];
+        app.ui_state.explorer.selected_idx = 1;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.selected_idx, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.selected_idx, 0);
+    }
+
+    #[test]
+    fn test_system_processes_j_moves_cursor() {
+        use crate::collectors::process::{ProbeStatus, ProcessCandidate};
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::SystemProcesses;
+        app.discovered_processes = vec![
+            ProcessCandidate {
+                pid: 1,
+                command: "a".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+            ProcessCandidate {
+                pid: 2,
+                command: "b".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+        ];
+        assert_eq!(app.ui_state.selected_process_idx, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.ui_state.selected_process_idx, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.ui_state.selected_process_idx, 1);
+    }
+
+    #[test]
+    fn test_set_discovered_processes_clamps_cursor() {
+        use crate::collectors::process::{ProbeStatus, ProcessCandidate};
+        let mut app = App::new(Config::default());
+        app.ui_state.selected_process_idx = 5;
+
+        app.set_discovered_processes(vec![
+            ProcessCandidate {
+                pid: 1,
+                command: "a".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+            ProcessCandidate {
+                pid: 2,
+                command: "b".to_string(),
+                cwd: None,
+                cpu_milli_percent: 0,
+                memory_bytes: 0,
+                status: ProbeStatus::Ok,
+                pid_reused: false,
+            },
+        ]);
+        assert_eq!(app.ui_state.selected_process_idx, 1);
+    }
+
+    #[test]
+    fn test_set_discovered_files_stores_files() {
+        use crate::discovery::FileFormat;
+        let mut app = App::new(Config::default());
+        let files = sample_discovered_files();
+        app.set_discovered_files(files.clone());
+        assert_eq!(app.discovered_files.len(), 2);
+        assert_eq!(app.discovered_files[0].format, FileFormat::Jsonl);
+    }
+
+    #[test]
+    fn test_keymap_entries_contains_new_bindings() {
+        let entries = keymap_entries("default");
+        assert!(entries.iter().any(|(k, _)| k == "Home: e"));
+        assert!(entries.iter().any(|(k, _)| k == "Explorer: /"));
+        assert!(entries.iter().any(|(k, _)| k == "Processes: a"));
+    }
+
+    #[test]
+    fn test_explorer_search_mode_chars_update_query() {
+        let mut app = App::new(Config::default());
+        app.ui_state.primary_view = PrimaryView::RunExplorer;
+        app.ui_state.explorer.search_active = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.search_query, "foo");
+
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.ui_state.explorer.search_query, "fo");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.ui_state.explorer.search_active);
     }
 }
