@@ -121,8 +121,24 @@ pub enum PanelFocus {
     Files,
 }
 
-impl PanelFocus {
-    pub const ORDER: [Self; 4] = [Self::Overview, Self::Runs, Self::Processes, Self::Files];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HomeFocusTarget {
+    #[default]
+    Overview,
+    Runs,
+    Processes,
+    Files,
+    Alerts,
+}
+
+impl HomeFocusTarget {
+    const ORDER: [Self; 5] = [
+        Self::Overview,
+        Self::Runs,
+        Self::Processes,
+        Self::Files,
+        Self::Alerts,
+    ];
 
     fn next(self) -> Self {
         let idx = Self::ORDER
@@ -144,12 +160,87 @@ impl PanelFocus {
         };
         Self::ORDER[next]
     }
+
+    fn into_panel_focus(self) -> Option<PanelFocus> {
+        match self {
+            Self::Overview => Some(PanelFocus::Overview),
+            Self::Runs => Some(PanelFocus::Runs),
+            Self::Processes => Some(PanelFocus::Processes),
+            Self::Files => Some(PanelFocus::Files),
+            Self::Alerts => None,
+        }
+    }
+
+    fn from_panel_focus(focus: Option<PanelFocus>) -> Self {
+        match focus {
+            Some(PanelFocus::Overview) => Self::Overview,
+            Some(PanelFocus::Runs) => Self::Runs,
+            Some(PanelFocus::Processes) => Self::Processes,
+            Some(PanelFocus::Files) => Self::Files,
+            None => Self::Alerts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunDetailFocusTarget {
+    #[default]
+    Core,
+    Eval,
+    LearningRate,
+    GradNorm,
+}
+
+impl RunDetailFocusTarget {
+    const ORDER: [Self; 4] = [Self::Core, Self::Eval, Self::LearningRate, Self::GradNorm];
+
+    fn next(self) -> Self {
+        let idx = Self::ORDER
+            .iter()
+            .position(|focus| *focus == self)
+            .unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
+    }
+
+    fn previous(self) -> Self {
+        let idx = Self::ORDER
+            .iter()
+            .position(|focus| *focus == self)
+            .unwrap_or(0);
+        let next = if idx == 0 {
+            Self::ORDER.len() - 1
+        } else {
+            idx - 1
+        };
+        Self::ORDER[next]
+    }
+
+    fn to_box_index(self) -> u8 {
+        match self {
+            Self::Core => 1,
+            Self::Eval => 2,
+            Self::LearningRate => 3,
+            Self::GradNorm => 4,
+        }
+    }
+
+    fn from_box_index(index: u8) -> Self {
+        match index {
+            1 => Self::Core,
+            2 => Self::Eval,
+            3 => Self::LearningRate,
+            4 => Self::GradNorm,
+            _ => Self::Core,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MonitoringState {
     pub route: MonitoringRoute,
     pub focused_panel: Option<PanelFocus>,
+    pub home_focus: HomeFocusTarget,
+    pub run_detail_focus: RunDetailFocusTarget,
     pub selected_run_id: Option<String>,
     pub selected_pid: Option<u32>,
 }
@@ -671,6 +762,8 @@ impl App {
                 monitoring: MonitoringState {
                     route: MonitoringRoute::RunDetail,
                     focused_panel: Some(PanelFocus::Overview),
+                    home_focus: HomeFocusTarget::Overview,
+                    run_detail_focus: RunDetailFocusTarget::Core,
                     selected_run_id: None,
                     selected_pid: None,
                 },
@@ -920,6 +1013,7 @@ impl App {
             );
         }
         self.ui_state.monitoring.selected_pid = Some(candidate.pid);
+        self.update_home_focus_target(self.current_home_focus_target());
         self.set_monitoring_route(MonitoringRoute::RunDetail);
     }
 
@@ -929,6 +1023,37 @@ impl App {
             MonitoringRoute::Home => PrimaryView::Home,
             MonitoringRoute::RunDetail => PrimaryView::LiveRun,
         };
+
+        match route {
+            MonitoringRoute::Home => {
+                self.ui_state.monitoring.focused_panel =
+                    self.ui_state.monitoring.home_focus.into_panel_focus();
+            }
+            MonitoringRoute::RunDetail => {
+                self.ui_state.focused_box =
+                    self.ui_state.monitoring.run_detail_focus.to_box_index();
+            }
+        }
+    }
+
+    fn update_home_focus_target(&mut self, focus: HomeFocusTarget) {
+        self.ui_state.monitoring.home_focus = focus;
+        self.ui_state.monitoring.focused_panel = focus.into_panel_focus();
+    }
+
+    fn current_home_focus_target(&self) -> HomeFocusTarget {
+        let panel_focus = self.ui_state.monitoring.focused_panel;
+        let target = HomeFocusTarget::from_panel_focus(panel_focus);
+        if target != self.ui_state.monitoring.home_focus {
+            target
+        } else {
+            self.ui_state.monitoring.home_focus
+        }
+    }
+
+    fn set_run_detail_focus_target(&mut self, focus: RunDetailFocusTarget) {
+        self.ui_state.monitoring.run_detail_focus = focus;
+        self.ui_state.focused_box = focus.to_box_index();
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -943,9 +1068,12 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         let is_help_key = matches!(key.code, KeyCode::Char('?'));
+        let monitoring_search_active = matches!(self.ui_state.mode, AppMode::Monitoring)
+            && matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+            && self.ui_state.explorer.search_active;
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            (KeyCode::Char('q'), KeyModifiers::NONE) if !monitoring_search_active => {
                 self.running = false;
                 return;
             }
@@ -1134,17 +1262,102 @@ impl App {
             return;
         }
 
-        // Global commands (work in any view)
+        if matches!(self.ui_state.mode, AppMode::Monitoring) {
+            if self.handle_key_monitoring_input_mode(key) {
+                return;
+            }
+
+            if self.handle_key_monitoring_global_overlay(key, is_help_key) {
+                return;
+            }
+
+            if self.handle_key_monitoring_route(key) {
+                return;
+            }
+
+            self.handle_key_monitoring_focused_panel(key);
+            return;
+        }
+
+        if is_help_key {
+            self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
+        }
+    }
+
+    fn cycle_home_panel(&mut self, forward: bool) {
+        if !matches!(self.ui_state.mode, AppMode::Monitoring)
+            || !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+        {
+            return;
+        }
+
+        let current = self.current_home_focus_target();
+        self.update_home_focus_target(if forward {
+            current.next()
+        } else {
+            current.previous()
+        });
+    }
+
+    fn cycle_run_detail_focus(&mut self, forward: bool) {
+        if !matches!(self.ui_state.mode, AppMode::Monitoring)
+            || !matches!(self.ui_state.monitoring.route, MonitoringRoute::RunDetail)
+        {
+            return;
+        }
+
+        let current = RunDetailFocusTarget::from_box_index(self.ui_state.focused_box);
+        self.set_run_detail_focus_target(if forward {
+            current.next()
+        } else {
+            current.previous()
+        });
+    }
+
+    fn handle_key_monitoring_input_mode(&mut self, key: KeyEvent) -> bool {
+        if !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+            || !self.ui_state.explorer.search_active
+        {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.ui_state.explorer.search_active = false;
+            }
+            KeyCode::Enter => {
+                self.ui_state.explorer.search_active = false;
+                self.refresh_explorer_records();
+            }
+            KeyCode::Backspace => {
+                self.ui_state.explorer.search_query.pop();
+                self.refresh_explorer_records();
+            }
+            KeyCode::Char(c) => {
+                self.ui_state.explorer.search_query.push(c);
+                self.refresh_explorer_records();
+            }
+            _ => {}
+        }
+
+        true
+    }
+
+    fn handle_key_monitoring_global_overlay(&mut self, key: KeyEvent, is_help_key: bool) -> bool {
         match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                self.running = false;
+                true
+            }
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 self.ui_state.mode =
                     AppMode::Settings(Box::new(SettingsState::from_config(&self.config)));
+                true
             }
             _ if is_help_key => {
                 self.ui_state.mode = AppMode::Help(Box::new(HelpState::from_config(&self.config)));
+                true
             }
-            (KeyCode::Tab, _) => self.cycle_home_panel(true),
-            (KeyCode::BackTab, _) => self.cycle_home_panel(false),
             (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 let follow_latest = !self.ui_state.graph_viewports[0].follow_latest;
                 for vp in &mut self.ui_state.graph_viewports {
@@ -1157,6 +1370,7 @@ impl App {
                 if follow_latest {
                     self.ui_state.system_viewport.offset_samples = 0;
                 }
+                true
             }
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
                 for vp in &mut self.ui_state.graph_viewports {
@@ -1167,28 +1381,73 @@ impl App {
                 self.ui_state.system_viewport.follow_latest = true;
                 self.ui_state.system_viewport.offset_samples = 0;
                 self.ui_state.system_viewport.zoom_level = 0;
+                true
             }
-            _ => self.handle_key_home(key),
+            _ => false,
         }
     }
 
-    fn cycle_home_panel(&mut self, forward: bool) {
-        if !matches!(self.ui_state.mode, AppMode::Monitoring)
-            || !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
-        {
-            return;
+    fn handle_key_monitoring_route(&mut self, key: KeyEvent) -> bool {
+        match self.ui_state.monitoring.route {
+            MonitoringRoute::Home => match (key.code, key.modifiers) {
+                (KeyCode::Tab, _) => {
+                    self.cycle_home_panel(true);
+                    true
+                }
+                (KeyCode::BackTab, _) => {
+                    self.cycle_home_panel(false);
+                    true
+                }
+                (KeyCode::Enter, _) => self.handle_home_route_enter(),
+                _ => false,
+            },
+            MonitoringRoute::RunDetail => match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.set_monitoring_route(MonitoringRoute::Home);
+                    true
+                }
+                (KeyCode::Tab, _) => {
+                    self.cycle_run_detail_focus(true);
+                    true
+                }
+                (KeyCode::BackTab, _) => {
+                    self.cycle_run_detail_focus(false);
+                    true
+                }
+                _ => false,
+            },
         }
+    }
 
-        let current = self
-            .ui_state
-            .monitoring
-            .focused_panel
-            .unwrap_or(PanelFocus::Overview);
-        self.ui_state.monitoring.focused_panel = Some(if forward {
-            current.next()
-        } else {
-            current.previous()
-        });
+    fn handle_home_route_enter(&mut self) -> bool {
+        let focus_target = self.current_home_focus_target();
+        self.update_home_focus_target(focus_target);
+
+        match focus_target {
+            HomeFocusTarget::Runs => {
+                self.sync_focused_run_from_index();
+                if let Some(record) = self
+                    .selected_run_index()
+                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
+                {
+                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
+                    self.set_monitoring_route(MonitoringRoute::RunDetail);
+                }
+                true
+            }
+            HomeFocusTarget::Processes => {
+                self.sync_focused_process_from_index();
+                if let Some(candidate) = self
+                    .selected_process_index()
+                    .and_then(|idx| self.discovered_processes.get(idx))
+                    .cloned()
+                {
+                    self.attach_process_and_switch(&candidate);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn handle_key_run_detail(&mut self, key: KeyEvent) {
@@ -1196,7 +1455,9 @@ impl App {
         match (key.code, key.modifiers) {
             // Box focus (tab-level)
             (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
-                self.ui_state.focused_box = c as u8 - b'0';
+                self.set_run_detail_focus_target(RunDetailFocusTarget::from_box_index(
+                    c as u8 - b'0',
+                ));
             }
             // Zoom (box-level)
             (KeyCode::Char('-'), KeyModifiers::NONE) => {
@@ -1238,47 +1499,28 @@ impl App {
             (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE)
                 if is_vim || matches!(key.code, KeyCode::Down) =>
             {
-                let next = if self.ui_state.focused_box >= 4 {
-                    1
-                } else {
-                    self.ui_state.focused_box + 1
-                };
-                self.ui_state.focused_box = next;
+                self.cycle_run_detail_focus(true);
             }
             (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE)
                 if is_vim || matches!(key.code, KeyCode::Up) =>
             {
-                let next = if self.ui_state.focused_box <= 1 {
-                    4
-                } else {
-                    self.ui_state.focused_box - 1
-                };
-                self.ui_state.focused_box = next;
+                self.cycle_run_detail_focus(false);
             }
             _ => {}
         }
     }
 
-    fn handle_key_home(&mut self, key: KeyEvent) {
+    fn handle_key_monitoring_focused_panel(&mut self, key: KeyEvent) {
         match self.ui_state.monitoring.route {
-            MonitoringRoute::Home => {
-                if self.ui_state.explorer.search_active {
-                    self.handle_key_run_explorer(key);
-                    return;
-                }
-
-                match self
-                    .ui_state
-                    .monitoring
-                    .focused_panel
-                    .unwrap_or(PanelFocus::Overview)
-                {
-                    PanelFocus::Runs => self.handle_key_run_explorer(key),
-                    PanelFocus::Processes => self.handle_key_system_processes(key),
-                    PanelFocus::Overview | PanelFocus::Files => self.handle_key_home_workspace(key),
-                }
-            }
             MonitoringRoute::RunDetail => self.handle_key_run_detail(key),
+            MonitoringRoute::Home => match self.current_home_focus_target() {
+                HomeFocusTarget::Runs => self.handle_key_run_explorer(key),
+                HomeFocusTarget::Processes => self.handle_key_system_processes(key),
+                HomeFocusTarget::Overview | HomeFocusTarget::Files => {
+                    self.handle_key_home_workspace(key)
+                }
+                HomeFocusTarget::Alerts => self.handle_key_home_alerts(key),
+            },
         }
     }
 
@@ -1296,6 +1538,7 @@ impl App {
                 {
                     self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
                 }
+                self.update_home_focus_target(self.current_home_focus_target());
                 self.set_monitoring_route(MonitoringRoute::RunDetail);
             }
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
@@ -1308,14 +1551,17 @@ impl App {
                     self.attach_process_and_switch(&candidate);
                 }
             }
-            (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                self.ui_state.mode = AppMode::Scanning;
-            }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 self.load_recent_runs();
                 self.refresh_explorer_records();
             }
             _ => {}
+        }
+    }
+
+    fn handle_key_home_alerts(&mut self, key: KeyEvent) {
+        if let (KeyCode::Char('r'), KeyModifiers::NONE) = (key.code, key.modifiers) {
+            self.evaluate_alerts();
         }
     }
 
@@ -1369,18 +1615,6 @@ impl App {
             }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 self.refresh_explorer_records();
-            }
-            (KeyCode::Enter, _) => {
-                self.sync_focused_run_from_index();
-                if let Some(record) = self
-                    .selected_run_index()
-                    .and_then(|idx| self.ui_state.explorer.records.get(idx))
-                {
-                    self.ui_state.monitoring.selected_run_id = Some(record.run_id.clone());
-                    if record.status == crate::store::types::RunStatus::Active {
-                        self.set_monitoring_route(MonitoringRoute::RunDetail);
-                    }
-                }
             }
             _ => {}
         }
