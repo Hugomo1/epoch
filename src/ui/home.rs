@@ -5,15 +5,23 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, HomeFocusTarget};
-use crate::ui::components::{format_duration, format_step};
+use crate::ui::alerts_panel::{AlertPanelData, render_alert_panel};
+use crate::ui::components::{centered_text_area, format_duration, format_step};
 use crate::ui::theme::resolve_palette_from_config;
+
+const TOP_SUMMARY_PANEL_HEIGHT: u16 = 7;
+const RIGHT_COLUMN_TARGET_WIDTH: u16 = 58;
+const RIGHT_COLUMN_MIN_WIDTH: u16 = 28;
+const LEFT_COLUMN_MIN_WIDTH: u16 = 40;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let palette = resolve_palette_from_config(&app.config);
 
+    let right_width = right_column_width(area.width);
+
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Min(0), Constraint::Length(right_width)])
         .split(area);
 
     let left_col = horizontal_chunks[0];
@@ -22,7 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let left_col_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(TOP_SUMMARY_PANEL_HEIGHT),
             Constraint::Min(12),
             Constraint::Length(process_panel_height(app)),
         ])
@@ -30,7 +38,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let right_col_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(TOP_SUMMARY_PANEL_HEIGHT),
+            Constraint::Min(0),
+        ])
         .split(right_col);
 
     let overview_area = left_col_chunks[0];
@@ -63,13 +74,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         *focus == HomeFocusTarget::Processes,
     );
     crate::ui::system_processes::render_resource_strip(frame, system_area, app, &palette);
-    render_alerts(
-        frame,
-        alerts_area,
-        app,
-        &palette,
-        *focus == HomeFocusTarget::Alerts,
-    );
+    render_alerts(frame, alerts_area, app, &palette);
 }
 
 fn render_overview(
@@ -148,12 +153,13 @@ fn render_overview(
             .style(Style::default().fg(palette.header_fg));
         frame.render_widget(paragraph, area);
     } else {
-        let paragraph =
-            Paragraph::new("No metrics received yet. Focus Runs to browse stored runs.")
-                .block(block)
-                .style(Style::default().fg(palette.muted))
-                .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
+        let message = "No metrics received yet. Focus Runs to browse stored runs.";
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let paragraph = Paragraph::new(message)
+            .style(Style::default().fg(palette.muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(paragraph, centered_text_area(inner, message));
     }
 }
 
@@ -162,66 +168,17 @@ fn render_alerts(
     area: Rect,
     app: &App,
     palette: &crate::ui::theme::ThemePalette,
-    is_focused: bool,
 ) {
-    let mut title_style = Style::default();
-    let mut border_style = Style::default();
+    let (active, resolved) = app.home_alert_records();
+    let data = AlertPanelData::from_records(&active, &resolved);
+    render_alert_panel(frame, area, &data, palette, "Alerts", false, 5, 3);
+}
 
-    if is_focused {
-        border_style = border_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-        title_style = title_style.fg(palette.accent).add_modifier(Modifier::BOLD);
-    } else {
-        border_style = border_style.fg(palette.muted);
-        title_style = title_style.fg(palette.header_fg);
-    }
-
-    let block = Block::default()
-        .title("[4] Alerts")
-        .title_style(title_style)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
-        let empty = Paragraph::new("  ✓  No alerts")
-            .alignment(Alignment::Left)
-            .block(block)
-            .style(Style::default().fg(palette.success));
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    for alert in app.alerts.active.iter().take(5) {
-        let (prefix, color) = match alert.level {
-            crate::app::AlertLevel::Critical => ("CRIT", palette.error),
-            crate::app::AlertLevel::Warning => ("WARN", palette.warning),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{prefix} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&alert.message, Style::default().fg(color)),
-        ]));
-    }
-
-    if !app.alerts.active.is_empty() && !app.alerts.resolved.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "--- resolved ---",
-            Style::default().fg(palette.muted),
-        )));
-    }
-
-    for alert in app.alerts.resolved.iter().rev().take(3) {
-        lines.push(Line::from(Span::styled(
-            &alert.message,
-            Style::default().fg(palette.muted),
-        )));
-    }
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
+fn right_column_width(total_width: u16) -> u16 {
+    let max_allowed = total_width.saturating_sub(LEFT_COLUMN_MIN_WIDTH);
+    let target = RIGHT_COLUMN_TARGET_WIDTH.min(max_allowed);
+    let min_width = RIGHT_COLUMN_MIN_WIDTH.min(total_width.saturating_sub(1));
+    target.max(min_width)
 }
 
 fn process_panel_height(app: &App) -> u16 {

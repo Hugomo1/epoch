@@ -1,8 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::Alignment;
+use ratatui::layout::Constraint;
+use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::ui::theme::ThemePalette;
@@ -18,11 +21,26 @@ pub fn render_empty_state(
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.muted));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let centered = centered_text_area(inner, message);
     let paragraph = Paragraph::new(message)
-        .block(block)
         .style(Style::default().fg(palette.muted))
         .alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, centered);
+}
+
+pub fn centered_text_area(area: Rect, text: &str) -> Rect {
+    let line_count = text.lines().count().max(1) as u16;
+    let content_height = line_count.min(area.height.max(1));
+    let [_, centered, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(content_height),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    centered
 }
 
 pub fn render_action_bar(frame: &mut Frame, area: Rect, actions: &str, palette: &ThemePalette) {
@@ -49,14 +67,18 @@ pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{:.1}M", bytes as f64 / MB as f64)
+        format!("{:.1} MB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
-        format!("{:.1}K", bytes as f64 / KB as f64)
+        format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{}B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -118,4 +140,38 @@ pub fn format_duration(duration: Duration) -> String {
     let minutes = (duration.as_secs() % 3600) / 60;
     let seconds = duration.as_secs() % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+pub fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
+    if history.len() < 2 {
+        return "→";
+    }
+
+    let Some(&last) = history.back() else {
+        return "→";
+    };
+    let last = last as f64;
+    let count = (history.len() - 1).min(10);
+
+    let sum: u64 = history.iter().rev().skip(1).take(count).sum();
+    let avg = sum as f64 / count as f64;
+
+    if last > avg * 1.01 {
+        "↑"
+    } else if last < avg * 0.99 {
+        "↓"
+    } else {
+        "→"
+    }
+}
+
+pub fn format_lr_value(lr: f64) -> String {
+    format!("{:.1e}", lr)
+}
+
+pub fn format_optional_float(value: Option<f64>, decimals: usize) -> String {
+    match value {
+        Some(v) => format!("{v:.decimals$}"),
+        None => "—".to_string(),
+    }
 }

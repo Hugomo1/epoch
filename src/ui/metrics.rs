@@ -1,11 +1,10 @@
-use std::collections::VecDeque;
-
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 
 use crate::app::{App, DataHealthState};
+use crate::ui::components::{format_lr_value, format_optional_float, format_step, trend_indicator};
 use crate::ui::graph::render_line_graph;
 use crate::ui::theme::resolve_palette_from_config;
 
@@ -233,61 +232,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(points_para, summary_chunks[1]);
 }
 
-fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
-    if history.len() < 2 {
-        return "→";
-    }
-
-    let Some(&last) = history.back() else {
-        return "→";
-    };
-    let last = last as f64;
-    let count = (history.len() - 1).min(10);
-
-    // Average of the preceding 'count' elements (excluding the very last one)
-    let sum: u64 = history.iter().rev().skip(1).take(count).sum();
-    let avg = sum as f64 / count as f64;
-
-    if last > avg * 1.01 {
-        "↑"
-    } else if last < avg * 0.99 {
-        "↓"
-    } else {
-        "→"
-    }
-}
-
-fn format_step(step: u64) -> String {
-    let s = step.to_string();
-    let mut result = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-
-    for (i, c) in chars.into_iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
-}
-
-fn format_lr_value(lr: f64) -> String {
-    format!("{:.1e}", lr)
-}
-
-fn format_optional_float(value: Option<f64>, decimals: usize) -> String {
-    match value {
-        Some(v) => format!("{v:.decimals$}"),
-        None => "—".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::collections::VecDeque;
     use std::time::Instant;
 
     use crate::config::Config;
@@ -407,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_format_step() {
-        assert_eq!(format_step(1234567), "1,234,567");
+        assert_eq!(format_step(1234567), "1.2M");
         assert_eq!(format_step(1000), "1,000");
     }
 

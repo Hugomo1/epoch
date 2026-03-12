@@ -43,12 +43,37 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
+    let Cli {
+        log_file: cli_log_file,
+        stdin: cli_stdin,
+        parser: cli_parser,
+    } = cli;
+    let cli_requested_source = cli_stdin || cli_log_file.is_some();
 
     let project_root = std::env::current_dir()
         .ok()
         .and_then(|cwd| epoch::project_resolution::resolve_project_identity(&cwd, &[], &[], &[]));
     let mut config = epoch::config::Config::load_effective(project_root.as_deref())?;
-    config.merge_cli_args(cli.log_file, cli.stdin, cli.parser);
+    config.merge_cli_args(cli_log_file, cli_stdin, cli_parser);
+
+    if !cli_requested_source && !config.stdin_mode {
+        if let Some(path) = config.log_file.clone() {
+            let resolved = if path.is_absolute() {
+                path
+            } else {
+                project_root
+                    .as_ref()
+                    .map(|root| root.join(&path))
+                    .unwrap_or(path)
+            };
+
+            if resolved.exists() {
+                config.log_file = Some(resolved);
+            } else {
+                config.log_file = None;
+            }
+        }
+    }
 
     setup_tracing();
 
@@ -180,6 +205,26 @@ async fn main() -> Result<()> {
                 active_run_id = Some(result.run_id.clone());
                 app.ui_state.monitoring.run_detail.selected_run_id = Some(result.run_id);
             }
+        }
+
+        app.set_current_stream_run_id(active_run_id.clone());
+
+        let has_active_attached_run = active_run_id
+            .as_deref()
+            .and_then(|run_id| {
+                app.run_store
+                    .as_ref()
+                    .and_then(|store| store.get_run(run_id).ok().flatten())
+            })
+            .is_some_and(|record| matches!(record.status, RunStatus::Active));
+
+        if has_active_attached_run {
+            app.ui_state.monitoring.route = epoch::app::MonitoringRoute::RunDetail;
+        } else {
+            app.ui_state.monitoring.route = epoch::app::MonitoringRoute::Home;
+            app.ui_state.monitoring.run_detail.selected_run_id = None;
+            active_run_id = None;
+            app.set_current_stream_run_id(None);
         }
 
         if !app.running {

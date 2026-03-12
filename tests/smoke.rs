@@ -256,7 +256,7 @@ fn test_home_panel_cycling_many_times_keeps_home_route() {
     let mut app = App::new(Config::default());
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let tab_key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-    for _ in 0..100 {
+    for _ in 0..99 {
         app.handle_key(tab_key);
     }
 

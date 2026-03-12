@@ -1,4 +1,5 @@
 pub mod advanced;
+pub mod alerts_panel;
 pub mod components;
 pub mod dashboard;
 pub mod file_picker;
@@ -6,8 +7,8 @@ pub mod graph;
 pub mod header;
 pub mod help;
 pub mod home;
-pub mod live;
 pub mod metrics;
+pub mod run_detail;
 pub mod run_explorer;
 pub mod settings;
 pub mod system;
@@ -92,11 +93,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Settings(state) => settings::render(frame, content_area, state),
         AppMode::Monitoring => match app.ui_state.monitoring.route {
             MonitoringRoute::Home => home::render(frame, content_area, app),
-            MonitoringRoute::RunDetail => live::render_for_surface(
+            MonitoringRoute::RunDetail => run_detail::render_for_surface(
                 frame,
                 content_area,
                 app,
-                live::LiveSurface::RunDetail {
+                run_detail::RunSurface::RunDetail {
                     selected_run_id: app.run_detail_selected_run_id(),
                     compare_run_id: app.run_detail_compare_run_id(),
                 },
@@ -429,7 +430,7 @@ mod tests {
         app.ui_state.monitoring.home_focus = crate::app::HomeFocusTarget::Runs;
         assert_eq!(
             active_commands_for_view(&app),
-            "Up/Down:select  /:search  f:filter  Enter:view run  r:refresh"
+            "Up/Down:select  /:search  f:filter  n:rename  d:delete  Enter:view run  r:refresh"
         );
 
         app.ui_state.explorer.search_active = true;

@@ -4,6 +4,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, LineGauge, Paragraph};
 
 use crate::app::App;
+use crate::ui::components::format_bytes;
 use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
@@ -163,23 +164,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .empty_message("No RAM data")
         .palette(palette.accent, palette.muted, palette.header_fg)
         .render(frame, history_layout[1]);
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let tb = 1_099_511_627_776;
-    let gb = 1_073_741_824;
-    let mb = 1_048_576;
-    let kb = 1024;
-
-    if bytes >= tb {
-        format!("{:.1} TB", bytes as f64 / tb as f64)
-    } else if bytes >= gb {
-        format!("{:.1} GB", bytes as f64 / gb as f64)
-    } else if bytes >= mb {
-        format!("{:.1} MB", bytes as f64 / mb as f64)
-    } else {
-        format!("{:.1} KB", bytes as f64 / kb as f64)
-    }
 }
 
 fn format_temp(celsius: f64) -> String {

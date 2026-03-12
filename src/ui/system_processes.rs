@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::App;
 use crate::collectors::process::ProbeStatus;
 use crate::store::types::system_processes_columns;
-use crate::ui::components::{format_bytes, truncate};
+use crate::ui::components::{centered_text_area, format_bytes, truncate};
 use crate::ui::theme::{ThemePalette, resolve_palette_from_config};
 use crate::ui::{CPU_COLOR, GPU_COLOR, RAM_COLOR};
 
@@ -149,13 +149,13 @@ pub fn render_processes_table(
         .border_style(border_style);
 
     if count == 0 {
-        let p = Paragraph::new(
-            "No training processes detected.\nWhen this panel is empty it collapses so Runs can use the space.",
-        )
-        .block(block)
-        .style(Style::default().fg(palette.muted))
-        .alignment(Alignment::Center);
-        frame.render_widget(p, area);
+        let message = "No training processes detected.\nWhen this panel is empty it collapses so Runs can use the space.";
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let p = Paragraph::new(message)
+            .style(Style::default().fg(palette.muted))
+            .alignment(Alignment::Center);
+        frame.render_widget(p, centered_text_area(inner, message));
         return;
     }
 

@@ -210,6 +210,26 @@ impl RunStore {
         Ok(())
     }
 
+    pub fn rename_run(&self, run_id: &str, display_name: Option<&str>) -> Result<()> {
+        let now = now_epoch_secs();
+        self.conn.execute(
+            "
+            UPDATE runs
+            SET display_name = ?2,
+                last_updated_epoch_secs = ?3
+            WHERE run_id = ?1
+            ",
+            params![run_id, display_name, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_run(&self, run_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])?;
+        Ok(())
+    }
+
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         self.conn
             .query_row(
@@ -640,6 +660,62 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display_name, Some("training_v2".to_string()));
         assert_eq!(results[0].status, RunStatus::Completed);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rename_run_updates_display_name() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+        let metadata = RunMetadata {
+            display_name: Some("before".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python train.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: None,
+            git_dirty: None,
+            source_locator: Some("/project/train.log".to_string()),
+        };
+
+        let attached =
+            store.attach_or_create_active_run("fp-rename", RunSourceKind::LogFile, metadata)?;
+        store.rename_run(&attached.run_id, Some("after"))?;
+
+        let run = store
+            .get_run(&attached.run_id)?
+            .expect("run should still exist after rename");
+        assert_eq!(run.display_name.as_deref(), Some("after"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_run_removes_run_and_cascades_events() -> Result<()> {
+        let store = RunStore::open_in_memory()?;
+        let metadata = RunMetadata {
+            display_name: Some("to-delete".to_string()),
+            project_root: Some("/project".to_string()),
+            command: Some("python train.py".to_string()),
+            cwd: Some("/project".to_string()),
+            git_commit: None,
+            git_dirty: None,
+            source_locator: Some("/project/train.log".to_string()),
+        };
+
+        let attached =
+            store.attach_or_create_active_run("fp-delete", RunSourceKind::LogFile, metadata)?;
+        let _ = store.add_event(
+            &attached.run_id,
+            "note",
+            Some("hello"),
+            false,
+            now_epoch_secs(),
+            Some(1),
+        )?;
+
+        store.delete_run(&attached.run_id)?;
+        assert!(store.get_run(&attached.run_id)?.is_none());
+        assert!(store.list_events(&attached.run_id)?.is_empty());
 
         Ok(())
     }

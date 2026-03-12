@@ -1,17 +1,20 @@
-use std::collections::VecDeque;
-
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, DataHealthState, MonitoringRoute};
-use crate::ui::components::{format_duration, format_step};
+use crate::store::types::RunStatus;
+use crate::ui::alerts_panel::{AlertPanelData, render_alert_panel};
+use crate::ui::components::{
+    centered_text_area, format_duration, format_epoch_date, format_lr_value, format_optional_float,
+    format_step, trend_indicator,
+};
 use crate::ui::graph::MetricGraph;
 use crate::ui::theme::resolve_palette_from_config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiveSurface<'a> {
+pub enum RunSurface<'a> {
     Primary,
     RunDetail {
         selected_run_id: Option<&'a str>,
@@ -21,20 +24,21 @@ pub enum LiveSurface<'a> {
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let surface = match app.ui_state.monitoring.route {
-        MonitoringRoute::RunDetail => LiveSurface::RunDetail {
+        MonitoringRoute::RunDetail => RunSurface::RunDetail {
             selected_run_id: app.run_detail_selected_run_id(),
             compare_run_id: app.run_detail_compare_run_id(),
         },
-        MonitoringRoute::Home => LiveSurface::Primary,
+        MonitoringRoute::Home => RunSurface::Primary,
     };
 
     render_for_surface(frame, area, app, surface);
 }
 
-pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: LiveSurface<'_>) {
+pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: RunSurface<'_>) {
     let palette = resolve_palette_from_config(&app.config);
+    let latest = app.training.latest.as_ref();
 
-    if let LiveSurface::RunDetail {
+    if let RunSurface::RunDetail {
         selected_run_id: None,
         ..
     } = surface
@@ -48,7 +52,7 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
         return;
     }
 
-    let content_area = if let LiveSurface::RunDetail {
+    let content_area = if let RunSurface::RunDetail {
         selected_run_id: Some(run_id),
         ..
     } = surface
@@ -57,7 +61,15 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .areas(area);
-        let run_context = Paragraph::new(format!("Run Detail: {run_id}"))
+        let run_name = app
+            .selected_run_record()
+            .and_then(|record| record.display_name.as_deref())
+            .unwrap_or(run_id);
+        let run_status = app
+            .selected_run_record()
+            .map(|record| record.status.as_str())
+            .unwrap_or("unknown");
+        let run_context = Paragraph::new(format!("Run Detail: {run_name} ({run_status})"))
             .alignment(Alignment::Left)
             .style(Style::default().fg(palette.muted));
         frame.render_widget(run_context, context_area);
@@ -66,7 +78,7 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
         area
     };
 
-    if app.training.latest.is_none() {
+    if matches!(surface, RunSurface::Primary) && app.training.latest.is_none() {
         render_empty_state(
             frame,
             content_area,
@@ -77,6 +89,8 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
     }
 
     let focused = app.ui_state.focused_box;
+    let historical_run_detail =
+        matches!(surface, RunSurface::RunDetail { .. }) && !app.run_detail_accepts_live_updates();
 
     // Main layout: graphs on left (60%), panels on right (40%)
     let [graph_area, panel_area] = Layout::default()
@@ -129,7 +143,9 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
         &app.training.eval_loss_history,
         eval_area.width.saturating_sub(2).max(1).into(),
     );
-    MetricGraph::new("Eval Loss", &eval_data, palette.loss_color)
+    let current_eval = latest.and_then(|m| m.eval_loss);
+    let eval_title = format!("Eval Loss: {}", format_optional_float(current_eval, 4));
+    MetricGraph::new(&eval_title, &eval_data, palette.loss_color)
         .graph_mode(&app.config.graph_mode)
         .focused(focused == 2)
         .focus_index(Some(2))
@@ -165,7 +181,9 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
         &app.training.grad_norm_history,
         grad_area.width.saturating_sub(2).max(1).into(),
     );
-    MetricGraph::new("Grad Norm", &grad_data, palette.lr_color)
+    let current_grad = latest.and_then(|m| m.grad_norm);
+    let grad_title = format!("Grad Norm: {}", format_optional_float(current_grad, 3));
+    MetricGraph::new(&grad_title, &grad_data, palette.lr_color)
         .graph_mode(&app.config.graph_mode)
         .focused(focused == 4)
         .focus_index(Some(4))
@@ -184,10 +202,21 @@ pub fn render_for_surface(frame: &mut Frame, area: Rect, app: &App, surface: Liv
         ])
         .areas(panel_area);
 
-    render_stability_sidebar(frame, stability_area, app, &palette);
+    render_stability_sidebar(frame, stability_area, app, &palette, historical_run_detail);
     render_core_panel(frame, core_area, app, &palette);
     render_signals_panel(frame, signals_area, app, &palette);
-    render_alerts_panel(frame, alerts_area, app, &palette);
+    let (active_alerts, resolved_alerts) = app.run_detail_alert_records();
+    let alert_data = AlertPanelData::from_records(&active_alerts, &resolved_alerts);
+    render_alert_panel(
+        frame,
+        alerts_area,
+        &alert_data,
+        &palette,
+        "Alerts",
+        false,
+        6,
+        6,
+    );
 }
 
 fn render_empty_state(
@@ -199,15 +228,7 @@ fn render_empty_state(
     let paragraph = Paragraph::new(text)
         .alignment(Alignment::Center)
         .style(Style::default().fg(palette.muted));
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Length(2),
-            Constraint::Fill(1),
-        ])
-        .split(area);
-    frame.render_widget(paragraph, vertical[1]);
+    frame.render_widget(paragraph, centered_text_area(area, text));
 }
 
 fn render_stability_sidebar(
@@ -215,45 +236,82 @@ fn render_stability_sidebar(
     area: Rect,
     app: &App,
     palette: &crate::ui::theme::ThemePalette,
+    historical_run_detail: bool,
 ) {
     let border_color = palette.muted;
 
-    let system_line = if let Some(system) = app.system.latest.as_ref() {
-        let mem_pct = system.memory_usage_percent();
-        let gpu_pct = if system.gpus.is_empty() {
-            "n/a".to_string()
+    let (system_line, alert_line, parser_line) = if historical_run_detail {
+        let selected = app.selected_run_record();
+        let status = selected
+            .map(|record| record.status.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let started = selected
+            .map(|record| format_epoch_date(record.started_at_epoch_secs))
+            .unwrap_or_else(|| "-".to_string());
+        let ended = selected
+            .and_then(|record| record.ended_at_epoch_secs)
+            .map(format_epoch_date)
+            .unwrap_or_else(|| "ongoing".to_string());
+        let source = selected
+            .and_then(|record| record.source_locator.as_deref())
+            .unwrap_or("-")
+            .to_string();
+        let project = selected
+            .and_then(|record| record.project_root.as_deref())
+            .unwrap_or("-")
+            .to_string();
+
+        (
+            format!("Run: status {status} | started {started} | ended {ended}"),
+            format!("Source: {source} | Project: {project}"),
+            "Parser: snapshot mode".to_string(),
+        )
+    } else {
+        let system_line = if let Some(system) = app.system.latest.as_ref() {
+            let mem_pct = system.memory_usage_percent();
+            let gpu_pct = if system.gpus.is_empty() {
+                "n/a".to_string()
+            } else {
+                format!(
+                    "{:.1}%",
+                    system.gpus.iter().map(|g| g.utilization).sum::<f64>()
+                        / system.gpus.len() as f64
+                )
+            };
+            format!(
+                "CPU/RAM/GPU: {:.1}% / {:.1}% / {gpu_pct}",
+                system.cpu_usage, mem_pct
+            )
+        } else {
+            "CPU/RAM/GPU: n/a".to_string()
+        };
+
+        let alert_line = if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
+            "Alerts: none".to_string()
         } else {
             format!(
-                "{:.1}%",
-                system.gpus.iter().map(|g| g.utilization).sum::<f64>() / system.gpus.len() as f64
+                "Alerts active/resolved: {}/{}",
+                app.alerts.active.len(),
+                app.alerts.resolved.len()
             )
         };
-        format!(
-            "CPU/RAM/GPU: {:.1}% / {:.1}% / {gpu_pct}",
-            system.cpu_usage, mem_pct
-        )
-    } else {
-        "CPU/RAM/GPU: n/a".to_string()
-    };
 
-    let alert_line = if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
-        "Alerts: none".to_string()
-    } else {
-        format!(
-            "Alerts active/resolved: {}/{}",
-            app.alerts.active.len(),
-            app.alerts.resolved.len()
-        )
+        let parser_line = format!(
+            "Parser ok/skip/err: {}/{}/{}",
+            app.training.parser_success_count,
+            app.training.parser_skipped_count,
+            app.training.parser_error_count,
+        );
+
+        (system_line, alert_line, parser_line)
     };
 
     let text = format!(
-        "Perplexity: {}\nLoss spikes: {}\nNaN/Inf count: {}\nParser ok/skip/err: {}/{}/{}\n{}\n{}\n\nLast spike: {}\nLast NaN/Inf: {}\nHealth: {}",
+        "Perplexity: {}\nLoss spikes: {}\nNaN/Inf count: {}\n{}\n{}\n{}\n\nLast spike: {}\nLast NaN/Inf: {}\nHealth: {}",
         latest_or_dash(app.training.perplexity_latest, 3),
         app.training.loss_spike_count,
         app.training.nan_inf_count,
-        app.training.parser_success_count,
-        app.training.parser_skipped_count,
-        app.training.parser_error_count,
+        parser_line,
         system_line,
         alert_line,
         anomaly_age(app.training.last_loss_spike_at),
@@ -288,13 +346,26 @@ fn render_core_panel(
         .map(format_duration)
         .unwrap_or_else(|| "Idle".to_string());
 
-    let (status_text, status_color) = match app.training_data_health_state() {
-        DataHealthState::Live => (DataHealthState::Live.label(), palette.success),
-        DataHealthState::Stale => (DataHealthState::Stale.label(), palette.warning),
-        DataHealthState::NoData => (DataHealthState::NoData.label(), palette.muted),
-    };
+    let (status_text, status_color) =
+        if matches!(app.ui_state.monitoring.route, MonitoringRoute::RunDetail) {
+            match app
+                .selected_run_record()
+                .map(|record| record.status.clone())
+            {
+                Some(RunStatus::Active) => ("active", palette.success),
+                Some(RunStatus::Completed) => ("completed", palette.accent),
+                Some(RunStatus::Failed) => ("failed", palette.error),
+                None => ("unknown", palette.muted),
+            }
+        } else {
+            match app.training_data_health_state() {
+                DataHealthState::Live => (DataHealthState::Live.label(), palette.success),
+                DataHealthState::Stale => (DataHealthState::Stale.label(), palette.warning),
+                DataHealthState::NoData => (DataHealthState::NoData.label(), palette.muted),
+            }
+        };
 
-    let current_step = latest.and_then(|m| m.step).unwrap_or(0);
+    let current_step = app.current_run_step().unwrap_or(0);
     let step_text = if app.training.total_steps > 0 && latest.is_some_and(|m| m.step.is_some()) {
         format!(
             "Step: {} / {}",
@@ -401,92 +472,6 @@ fn render_signals_panel(
     frame.render_widget(paragraph, area);
 }
 
-fn render_alerts_panel(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    palette: &crate::ui::theme::ThemePalette,
-) {
-    let block = Block::default()
-        .title("Alerts")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.muted));
-
-    if app.alerts.active.is_empty() && app.alerts.resolved.is_empty() {
-        let empty = Paragraph::new("No alerts")
-            .alignment(Alignment::Left)
-            .block(block)
-            .style(Style::default().fg(palette.muted));
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let mut lines: Vec<ratatui::text::Line> = Vec::new();
-
-    for alert in &app.alerts.active {
-        let (prefix, color) = match alert.level {
-            crate::app::AlertLevel::Critical => ("CRIT", palette.error),
-            crate::app::AlertLevel::Warning => ("WARN", palette.warning),
-        };
-        lines.push(ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                format!("{prefix} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            ratatui::text::Span::styled(&alert.message, Style::default().fg(color)),
-        ]));
-    }
-
-    if !app.alerts.active.is_empty() && !app.alerts.resolved.is_empty() {
-        lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-            "--- resolved ---",
-            Style::default().fg(palette.muted),
-        )));
-    }
-
-    for alert in app.alerts.resolved.iter().rev().take(5) {
-        lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-            &alert.message,
-            Style::default().fg(palette.muted),
-        )));
-    }
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
-}
-
-fn trend_indicator(history: &VecDeque<u64>) -> &'static str {
-    if history.len() < 2 {
-        return "→";
-    }
-    let Some(&last) = history.back() else {
-        return "→";
-    };
-    let last = last as f64;
-    let count = (history.len() - 1).min(10);
-    let sum: u64 = history.iter().rev().skip(1).take(count).sum();
-    let avg = sum as f64 / count as f64;
-
-    if last > avg * 1.01 {
-        "↑"
-    } else if last < avg * 0.99 {
-        "↓"
-    } else {
-        "→"
-    }
-}
-
-fn format_lr_value(lr: f64) -> String {
-    format!("{:.1e}", lr)
-}
-
-fn format_optional_float(value: Option<f64>, decimals: usize) -> String {
-    match value {
-        Some(v) => format!("{v:.decimals$}"),
-        None => "—".to_string(),
-    }
-}
-
 fn latest_or_dash(value: Option<f64>, decimals: usize) -> String {
     match value {
         Some(v) => format!("{v:.decimals$}"),
@@ -527,13 +512,29 @@ mod tests {
     fn test_run_detail_requires_selected_run() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::new(Config::default());
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
 
         terminal.draw(|f| render(f, f.area(), &app)).unwrap();
         let buffer = terminal.backend().buffer();
         let content = buffer_to_string(buffer);
 
         assert!(content.contains("No run selected"));
+    }
+
+    #[test]
+    fn test_run_detail_with_selected_historical_run_does_not_require_live_input() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("run-42".to_string());
+
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(content.contains("Run Detail: run-42"));
+        assert!(!content.contains("No training metrics received yet"));
     }
 
     #[test]
@@ -566,6 +567,93 @@ mod tests {
         assert!(content.contains("Stability Summary"));
         assert!(content.contains("Core"));
         assert!(content.contains("Signals"));
+    }
+
+    #[test]
+    fn test_run_detail_uses_selected_run_alert_history_for_finished_run() {
+        use crate::store::repository::RunStore;
+        use crate::store::types::{RunMetadata, RunRecord, RunSourceKind, RunStatus};
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.set_store(RunStore::open_in_memory().expect("store should open"));
+
+        let run_id = app
+            .run_store
+            .as_ref()
+            .expect("store should exist")
+            .attach_or_create_active_run(
+                "fp-alert-history-live",
+                RunSourceKind::LogFile,
+                RunMetadata {
+                    display_name: Some("finished-run".to_string()),
+                    project_root: None,
+                    command: None,
+                    cwd: None,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some("/tmp/finished.log".to_string()),
+                },
+            )
+            .expect("attach should work")
+            .run_id;
+
+        app.run_store
+            .as_ref()
+            .expect("store should exist")
+            .complete_run(&run_id, RunStatus::Completed)
+            .expect("complete should work");
+        app.run_store
+            .as_ref()
+            .expect("store should exist")
+            .add_event(
+                &run_id,
+                "alert.warning",
+                Some("stored warning"),
+                false,
+                crate::store::types::now_epoch_secs(),
+                Some(20),
+            )
+            .expect("event insert should work");
+
+        app.alerts.active.push(crate::app::AlertRecord {
+            rule_id: "global".to_string(),
+            level: crate::app::AlertLevel::Critical,
+            value: 1.0,
+            message: "global alert should be hidden".to_string(),
+            tick: 1,
+        });
+
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
+        app.ui_state.monitoring.run_detail.selected_run_id = Some(run_id.clone());
+        app.ui_state.explorer.records = vec![RunRecord {
+            run_id: run_id.clone(),
+            source_fingerprint: "fp-alert-history-live".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: Some("/tmp/finished.log".to_string()),
+            project_root: None,
+            display_name: Some("finished-run".to_string()),
+            status: RunStatus::Completed,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 1,
+            ended_at_epoch_secs: Some(2),
+            last_step: Some(30),
+            last_updated_epoch_secs: 2,
+        }];
+
+        terminal.draw(|f| render(f, f.area(), &app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("stored") || content.contains("WARN"),
+            "expected stored run alert to render, got: {content}"
+        );
+        assert!(!content.contains("global alert should be hidden"));
+        assert!(!content.contains("No alerts"));
     }
 
     #[test]

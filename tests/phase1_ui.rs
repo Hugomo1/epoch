@@ -61,17 +61,23 @@ fn home_tab_cycles_panels_not_routes() {
     );
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Alerts);
-    assert_eq!(app.ui_state.monitoring.focused_panel, None);
-
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(
         app.ui_state.monitoring.home_focus,
         HomeFocusTarget::Overview
     );
+    assert_eq!(
+        app.ui_state.monitoring.focused_panel,
+        Some(PanelFocus::Overview)
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Runs);
 
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Alerts);
+    assert_eq!(
+        app.ui_state.monitoring.home_focus,
+        HomeFocusTarget::Overview
+    );
 }
 
 #[test]
@@ -274,7 +280,7 @@ fn render_buffer_home_workspace_shows_header_and_shell_hints() {
     assert!(content.contains("No Live Run"));
     assert!(content.contains("Runs"));
     assert!(content.contains("Alerts"));
-    assert!(content.contains("1-4:focus panel"));
+    assert!(content.contains("1-3:focus panel"));
     assert!(content.contains("r:refresh runs"));
     assert!(content.contains("?:help"));
 }
