@@ -11,6 +11,7 @@ use crate::collectors::training::parser_telemetry_snapshot;
 use crate::config::{AlertEvalMode, AlertRuleConfig, AlertRuleKind, Config};
 use crate::discovery::DiscoveredFile;
 use crate::event::Event;
+use crate::store::types::RunStatus;
 use crate::types::{SystemMetrics, TrainingMetrics};
 
 impl std::fmt::Debug for crate::store::repository::RunStore {
@@ -89,7 +90,24 @@ pub struct RunExplorerUiState {
     pub selected_idx: usize,
     pub search_query: String,
     pub search_active: bool,
+    pub rename_active: bool,
+    pub rename_buffer: String,
+    pub pending_delete_run_id: Option<String>,
     pub status_filter: Option<crate::store::types::RunStatus>,
+    // Cached values for performance optimization
+    pub processed_records: Vec<ProcessedRunRecord>,
+    pub active_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessedRunRecord {
+    pub status_icon: &'static str,
+    pub status_color: ratatui::style::Color,
+    pub name: String,
+    pub step: String,
+    pub started: String,
+    pub source: String,
+    pub display_name: String, // For detail strip
 }
 
 #[derive(Debug)]
@@ -157,18 +175,16 @@ pub enum HomeFocusTarget {
     Overview,
     Runs,
     Processes,
-    Alerts,
 }
 
 impl HomeFocusTarget {
-    const ORDER: [Self; 4] = [Self::Overview, Self::Runs, Self::Processes, Self::Alerts];
+    const ORDER: [Self; 3] = [Self::Overview, Self::Runs, Self::Processes];
 
     fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Runs => "Runs",
             Self::Processes => "Processes",
-            Self::Alerts => "Alerts",
         }
     }
 
@@ -177,7 +193,6 @@ impl HomeFocusTarget {
             Self::Overview => 1,
             Self::Runs => 2,
             Self::Processes => 3,
-            Self::Alerts => 4,
         }
     }
 
@@ -186,7 +201,6 @@ impl HomeFocusTarget {
             1 => Self::Overview,
             2 => Self::Runs,
             3 => Self::Processes,
-            4 => Self::Alerts,
             _ => Self::Overview,
         }
     }
@@ -217,7 +231,6 @@ impl HomeFocusTarget {
             Self::Overview => Some(PanelFocus::Overview),
             Self::Runs => Some(PanelFocus::Runs),
             Self::Processes => Some(PanelFocus::Processes),
-            Self::Alerts => None,
         }
     }
 
@@ -226,7 +239,7 @@ impl HomeFocusTarget {
             Some(PanelFocus::Overview) => Self::Overview,
             Some(PanelFocus::Runs) => Self::Runs,
             Some(PanelFocus::Processes) => Self::Processes,
-            None => Self::Alerts,
+            None => Self::Overview,
         }
     }
 }
@@ -673,7 +686,8 @@ fn keymap_entries(profile: &str) -> Vec<(String, String)> {
     ));
     entries.push((
         home_runs_meta.route_label.to_string(),
-        "Up/Down:select  /:search  f:filter  Enter:view run  r:refresh".to_string(),
+        "Up/Down:select  /:search  f:filter  n:rename  d:delete  Enter:view run  r:refresh"
+            .to_string(),
     ));
     entries.push((
         format!("{} (search)", home_runs_meta.route_label),
@@ -779,6 +793,8 @@ pub struct App {
     pub run_comparison: RunComparisonState,
     pub config: Config,
     pub run_store: Option<crate::store::repository::RunStore>,
+    current_stream_run_id: Option<String>,
+    pending_home_run_refresh: bool,
     pub project_root: Option<std::path::PathBuf>,
     pub recent_runs: Vec<crate::store::types::RunRecord>,
     pub discovered_files: Vec<crate::discovery::DiscoveredFile>,
@@ -788,6 +804,10 @@ impl App {
     const VIEWPORT_PAN_STEP: usize = 10;
     const VIEWPORT_MAX_ZOOM_LEVEL: u8 = 6;
     const STORE_REFRESH_INTERVAL_TICKS: u64 = 4;
+    const RUN_EVENT_ALERT_WARNING: &'static str = "alert.warning";
+    const RUN_EVENT_ALERT_CRITICAL: &'static str = "alert.critical";
+    const RUN_EVENT_ALERT_RESOLVED_WARNING: &'static str = "alert.resolved.warning";
+    const RUN_EVENT_ALERT_RESOLVED_CRITICAL: &'static str = "alert.resolved.critical";
 
     pub fn new(config: Config) -> Self {
         let capacity = config.history_size;
@@ -852,10 +872,16 @@ impl App {
             run_comparison: RunComparisonState::default(),
             config,
             run_store: None,
+            current_stream_run_id: None,
+            pending_home_run_refresh: false,
             project_root: None,
             recent_runs: Vec::new(),
             discovered_files: Vec::new(),
         }
+    }
+
+    pub fn set_current_stream_run_id(&mut self, run_id: Option<String>) {
+        self.current_stream_run_id = run_id;
     }
 
     pub fn should_show_metric_panel(&self, metric_id: &str, present: bool) -> bool {
@@ -882,14 +908,19 @@ impl App {
 
     pub fn set_store(&mut self, store: crate::store::repository::RunStore) {
         self.run_store = Some(store);
-        self.load_recent_runs();
-        self.refresh_explorer_records();
+        self.refresh_home_runs_state();
     }
 
     pub fn load_recent_runs(&mut self) {
         if let Some(store) = &self.run_store {
             self.recent_runs = store.list_recent_runs(5).unwrap_or_default();
         }
+    }
+
+    fn refresh_home_runs_state(&mut self) {
+        self.load_recent_runs();
+        self.refresh_explorer_records();
+        self.pending_home_run_refresh = false;
     }
 
     pub fn refresh_explorer_records(&mut self) {
@@ -921,6 +952,43 @@ impl App {
             };
             self.ui_state.explorer.records =
                 store.list_runs(status_str, query, 100).unwrap_or_default();
+
+            let mut processed_records = Vec::with_capacity(self.ui_state.explorer.records.len());
+            let mut active_count = 0;
+            let palette = crate::ui::theme::resolve_palette_from_config(&self.config);
+
+            for rec in &self.ui_state.explorer.records {
+                let (status_icon, status_color) = match rec.status {
+                    RunStatus::Active => {
+                        active_count += 1;
+                        ("●", palette.success)
+                    }
+                    RunStatus::Completed => ("✓", palette.muted),
+                    RunStatus::Failed => ("✗", palette.error),
+                };
+
+                let display_name = crate::ui::run_explorer::run_display_name(rec);
+                let name = crate::ui::components::truncate(&display_name, 20);
+                let step = rec
+                    .last_step
+                    .map(crate::ui::components::format_step)
+                    .unwrap_or_else(|| "-".to_string());
+                let started = crate::ui::components::format_epoch_date(rec.started_at_epoch_secs);
+                let source = rec.source_kind.as_str().to_string();
+
+                processed_records.push(crate::app::ProcessedRunRecord {
+                    status_icon,
+                    status_color,
+                    name,
+                    step,
+                    started,
+                    source,
+                    display_name,
+                });
+            }
+
+            self.ui_state.explorer.processed_records = processed_records;
+            self.ui_state.explorer.active_count = active_count;
 
             if let Some(id) = focused_run_id {
                 self.ui_state.monitoring.run_detail.selected_run_id = Some(id);
@@ -961,6 +1029,7 @@ impl App {
         &mut self,
         processes: Vec<crate::collectors::process::ProcessCandidate>,
     ) {
+        let mut completed_run_ids = Vec::new();
         if let Some(store) = &self.run_store {
             let active_process_runs = store
                 .list_runs(
@@ -986,13 +1055,33 @@ impl App {
                 let Some(pid) = pid_text.parse::<u32>().ok() else {
                     continue;
                 };
-                if !active_pids.contains(&pid) {
-                    let _ =
-                        store.complete_run(&run.run_id, crate::store::types::RunStatus::Completed);
+                if !active_pids.contains(&pid)
+                    && store
+                        .complete_run(&run.run_id, crate::store::types::RunStatus::Completed)
+                        .is_ok()
+                {
+                    completed_run_ids.push(run.run_id);
                 }
             }
-            self.load_recent_runs();
-            self.refresh_explorer_records();
+
+            if !completed_run_ids.is_empty() {
+                for record in &mut self.ui_state.explorer.records {
+                    if completed_run_ids
+                        .iter()
+                        .any(|run_id| run_id == &record.run_id)
+                    {
+                        record.status = crate::store::types::RunStatus::Completed;
+                    }
+                }
+
+                if matches!(self.ui_state.mode, AppMode::Monitoring)
+                    && matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+                {
+                    self.refresh_home_runs_state();
+                } else {
+                    self.pending_home_run_refresh = true;
+                }
+            }
         }
 
         let prev_idx = self.ui_state.selected_process_idx;
@@ -1067,6 +1156,100 @@ impl App {
             })
     }
 
+    fn selected_run_id_at_cursor(&self) -> Option<String> {
+        self.selected_run_index()
+            .and_then(|idx| self.ui_state.explorer.records.get(idx))
+            .map(|record| record.run_id.clone())
+    }
+
+    fn selected_run_display_name_default(&self) -> Option<String> {
+        let record = self
+            .selected_run_index()
+            .and_then(|idx| self.ui_state.explorer.records.get(idx))?;
+
+        if let Some(name) = record.display_name.as_deref().map(str::trim)
+            && !name.is_empty()
+        {
+            return Some(name.to_string());
+        }
+
+        if let Some(source_locator) = record.source_locator.as_deref()
+            && !source_locator.is_empty()
+        {
+            let path = std::path::Path::new(source_locator);
+            if let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+                && !file_name.is_empty()
+            {
+                return Some(file_name.to_string());
+            }
+            return Some(source_locator.to_string());
+        }
+
+        Some(record.run_id.chars().take(8).collect::<String>())
+    }
+
+    fn begin_run_rename_mode(&mut self) {
+        let Some(initial_name) = self.selected_run_display_name_default() else {
+            return;
+        };
+
+        self.ui_state.explorer.rename_active = true;
+        self.ui_state.explorer.rename_buffer = initial_name;
+    }
+
+    fn commit_selected_run_rename(&mut self) {
+        let Some(run_id) = self.selected_run_id_at_cursor() else {
+            self.ui_state.explorer.rename_active = false;
+            self.ui_state.explorer.rename_buffer.clear();
+            return;
+        };
+
+        let new_name = self.ui_state.explorer.rename_buffer.trim().to_string();
+        let display_name = if new_name.is_empty() {
+            None
+        } else {
+            Some(new_name.as_str())
+        };
+
+        if let Some(store) = self.run_store.as_ref() {
+            let _ = store.rename_run(&run_id, display_name);
+        }
+        self.refresh_explorer_records();
+        self.ui_state.explorer.rename_active = false;
+        self.ui_state.explorer.rename_buffer.clear();
+    }
+
+    fn confirm_selected_run_delete(&mut self) {
+        let Some(run_id) = self.selected_run_id_at_cursor() else {
+            self.ui_state.explorer.pending_delete_run_id = None;
+            return;
+        };
+
+        if self.ui_state.explorer.pending_delete_run_id.as_deref() != Some(run_id.as_str()) {
+            self.ui_state.explorer.pending_delete_run_id = Some(run_id);
+            return;
+        }
+
+        if let Some(store) = self.run_store.as_ref() {
+            let _ = store.delete_run(&run_id);
+        }
+
+        if self
+            .ui_state
+            .monitoring
+            .run_detail
+            .selected_run_id
+            .as_deref()
+            == Some(run_id.as_str())
+        {
+            self.ui_state.monitoring.run_detail.selected_run_id = None;
+            self.set_monitoring_route(MonitoringRoute::Home);
+        }
+
+        self.ui_state.explorer.pending_delete_run_id = None;
+        self.refresh_explorer_records();
+    }
+
     fn sync_focused_run_from_index(&mut self) {
         if self.ui_state.explorer.records.is_empty() {
             self.ui_state.explorer.selected_idx = 0;
@@ -1119,9 +1302,9 @@ impl App {
                 project_root_str.as_deref(),
             ) {
                 Ok(crate::home::service::AttachOutcome::Attached { run_id, .. }) => {
+                    self.current_stream_run_id = Some(run_id.clone());
                     self.ui_state.monitoring.run_detail.selected_run_id = Some(run_id);
-                    self.load_recent_runs();
-                    self.refresh_explorer_records();
+                    self.refresh_home_runs_state();
                 }
                 Ok(crate::home::service::AttachOutcome::PermissionDenied) | Err(_) => {
                     self.sync_focused_process_from_index();
@@ -1145,6 +1328,9 @@ impl App {
             MonitoringRoute::Home => {
                 self.ui_state.monitoring.focused_panel =
                     self.ui_state.monitoring.home_focus.into_panel_focus();
+                if self.pending_home_run_refresh {
+                    self.refresh_home_runs_state();
+                }
             }
             MonitoringRoute::RunDetail => {
                 self.ui_state.focused_box =
@@ -1259,6 +1445,12 @@ impl App {
                 .to_string();
         }
 
+        if matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+            && self.ui_state.explorer.rename_active
+        {
+            return "Type:name  Backspace:erase  Enter:save  Esc:cancel".to_string();
+        }
+
         match self.ui_state.monitoring.route {
             MonitoringRoute::Home => match self.current_home_focus_target() {
                 HomeFocusTarget::Overview => {
@@ -1269,12 +1461,17 @@ impl App {
                     }
                 }
                 HomeFocusTarget::Runs => {
+                    if self.ui_state.explorer.pending_delete_run_id.is_some() {
+                        return "Enter:confirm delete  Esc:cancel  Up/Down:select".to_string();
+                    }
                     let select_hint = if self.is_vim_keymap() {
                         "Up/Down/j/k:select"
                     } else {
                         "Up/Down:select"
                     };
-                    format!("{select_hint}  /:search  f:filter  Enter:view run  r:refresh")
+                    format!(
+                        "{select_hint}  /:search  f:filter  n:rename  d:delete  Enter:view run  r:refresh"
+                    )
                 }
                 HomeFocusTarget::Processes => {
                     let select_hint = if self.is_vim_keymap() {
@@ -1284,7 +1481,6 @@ impl App {
                     };
                     format!("{select_hint}  Enter:attach process  r:refresh")
                 }
-                HomeFocusTarget::Alerts => "r:refresh alerts".to_string(),
             },
             MonitoringRoute::RunDetail => {
                 let focus_hint = if self.is_vim_keymap() {
@@ -1307,7 +1503,7 @@ impl App {
 
         match self.ui_state.monitoring.route {
             MonitoringRoute::Home => {
-                parts.push("1-4:focus panel");
+                parts.push("1-3:focus panel");
                 parts.push("Tab/Shift+Tab:cycle");
             }
             MonitoringRoute::RunDetail => {
@@ -1601,9 +1797,44 @@ impl App {
     }
 
     fn handle_key_monitoring_input_mode(&mut self, key: KeyEvent) -> bool {
-        if !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
-            || !self.ui_state.explorer.search_active
-        {
+        if !matches!(self.ui_state.monitoring.route, MonitoringRoute::Home) {
+            return false;
+        }
+
+        if self.ui_state.explorer.rename_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.explorer.rename_active = false;
+                    self.ui_state.explorer.rename_buffer.clear();
+                }
+                KeyCode::Enter => {
+                    self.commit_selected_run_rename();
+                }
+                KeyCode::Backspace => {
+                    self.ui_state.explorer.rename_buffer.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.ui_state.explorer.rename_buffer.push(c);
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if self.ui_state.explorer.pending_delete_run_id.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.explorer.pending_delete_run_id = None;
+                }
+                KeyCode::Enter => {
+                    self.confirm_selected_run_delete();
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if !self.ui_state.explorer.search_active {
             return false;
         }
 
@@ -1676,7 +1907,7 @@ impl App {
     fn handle_key_monitoring_route(&mut self, key: KeyEvent) -> bool {
         match self.ui_state.monitoring.route {
             MonitoringRoute::Home => match (key.code, key.modifiers) {
-                (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
+                (KeyCode::Char(c @ '1'..='3'), KeyModifiers::NONE) => {
                     self.update_home_focus_target(HomeFocusTarget::from_box_index(c as u8 - b'0'));
                     true
                 }
@@ -1724,6 +1955,7 @@ impl App {
                     .selected_run_id
                     .is_some()
                 {
+                    self.load_run_detail_snapshot_for_selected_run();
                     self.set_monitoring_route(MonitoringRoute::RunDetail);
                     return true;
                 }
@@ -1737,6 +1969,7 @@ impl App {
                 {
                     self.ui_state.monitoring.run_detail.selected_run_id =
                         Some(record.run_id.clone());
+                    self.load_run_detail_snapshot_for_selected_run();
                     self.set_monitoring_route(MonitoringRoute::RunDetail);
                 }
                 true
@@ -1752,7 +1985,6 @@ impl App {
                 }
                 true
             }
-            HomeFocusTarget::Alerts => false,
         }
     }
 
@@ -1823,26 +2055,38 @@ impl App {
                 HomeFocusTarget::Runs => self.handle_key_run_explorer(key),
                 HomeFocusTarget::Processes => self.handle_key_system_processes(key),
                 HomeFocusTarget::Overview => self.handle_key_home_workspace(key),
-                HomeFocusTarget::Alerts => self.handle_key_home_alerts(key),
             },
         }
     }
 
     fn handle_key_home_workspace(&mut self, key: KeyEvent) {
         if let (KeyCode::Char('r'), KeyModifiers::NONE) = (key.code, key.modifiers) {
-            self.load_recent_runs();
-            self.refresh_explorer_records();
-        }
-    }
-
-    fn handle_key_home_alerts(&mut self, key: KeyEvent) {
-        if let (KeyCode::Char('r'), KeyModifiers::NONE) = (key.code, key.modifiers) {
-            self.evaluate_alerts();
+            self.refresh_home_runs_state();
         }
     }
 
     fn handle_key_run_explorer(&mut self, key: KeyEvent) {
         let is_vim = self.is_vim_keymap();
+
+        if self.ui_state.explorer.rename_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.explorer.rename_active = false;
+                    self.ui_state.explorer.rename_buffer.clear();
+                }
+                KeyCode::Enter => {
+                    self.commit_selected_run_rename();
+                }
+                KeyCode::Backspace => {
+                    self.ui_state.explorer.rename_buffer.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.ui_state.explorer.rename_buffer.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if self.ui_state.explorer.search_active {
             match key.code {
@@ -1866,6 +2110,19 @@ impl App {
             return;
         }
 
+        if self.ui_state.explorer.pending_delete_run_id.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.explorer.pending_delete_run_id = None;
+                }
+                KeyCode::Enter => {
+                    self.confirm_selected_run_delete();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('j'), _) | (KeyCode::Down, _)
                 if matches!(key.code, KeyCode::Down) || is_vim =>
@@ -1873,6 +2130,7 @@ impl App {
                 let max = self.ui_state.explorer.records.len().saturating_sub(1);
                 self.ui_state.explorer.selected_idx =
                     (self.ui_state.explorer.selected_idx + 1).min(max);
+                self.ui_state.explorer.pending_delete_run_id = None;
                 self.sync_focused_run_from_index();
             }
             (KeyCode::Char('k'), _) | (KeyCode::Up, _)
@@ -1880,10 +2138,17 @@ impl App {
             {
                 self.ui_state.explorer.selected_idx =
                     self.ui_state.explorer.selected_idx.saturating_sub(1);
+                self.ui_state.explorer.pending_delete_run_id = None;
                 self.sync_focused_run_from_index();
             }
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
                 self.ui_state.explorer.search_active = true;
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                self.begin_run_rename_mode();
+            }
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                self.confirm_selected_run_delete();
             }
             (KeyCode::Char('f'), KeyModifiers::NONE) => {
                 use crate::store::types::RunStatus;
@@ -1893,9 +2158,11 @@ impl App {
                     Some(RunStatus::Completed) => Some(RunStatus::Failed),
                     Some(RunStatus::Failed) => None,
                 };
+                self.ui_state.explorer.pending_delete_run_id = None;
                 self.refresh_explorer_records();
             }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                self.ui_state.explorer.pending_delete_run_id = None;
                 self.refresh_explorer_records();
             }
             _ => {}
@@ -1937,12 +2204,79 @@ impl App {
         }
     }
 
+    fn reset_training_snapshot_state(&mut self) {
+        self.training.latest = None;
+        self.training.loss_history.clear();
+        self.training.lr_history.clear();
+        self.training.step_history.clear();
+        self.training.throughput_history.clear();
+        self.training.tokens_history.clear();
+        self.training.eval_loss_history.clear();
+        self.training.grad_norm_history.clear();
+        self.training.samples_per_second_history.clear();
+        self.training.steps_per_second_history.clear();
+        self.training.tokens_per_second_history.clear();
+        self.training.step_loss_points.clear();
+        self.training.step_lr_points.clear();
+        self.training.perplexity_latest = None;
+        self.training.total_steps = 0;
+        self.training.start_time = None;
+        self.training.input_active = false;
+        self.training.last_data_at = None;
+    }
+
+    fn load_run_detail_snapshot_for_selected_run(&mut self) {
+        let Some(record) = self.selected_run_record().cloned() else {
+            return;
+        };
+
+        let is_active_run = matches!(record.status, crate::store::types::RunStatus::Active);
+        if !is_active_run {
+            self.reset_training_snapshot_state();
+        }
+
+        if is_active_run && self.training.latest.is_some() {
+            return;
+        }
+
+        if !matches!(
+            record.source_kind,
+            crate::store::types::RunSourceKind::LogFile
+        ) {
+            return;
+        }
+
+        let Some(source_locator) = record.source_locator else {
+            return;
+        };
+
+        let path = PathBuf::from(source_locator);
+        if !path.exists() {
+            return;
+        }
+
+        let snapshot =
+            crate::collectors::training::parse_snapshot(path, &self.config).unwrap_or_default();
+        if snapshot.is_empty() {
+            return;
+        }
+
+        self.reset_training_snapshot_state();
+        for metrics in snapshot {
+            self.push_metrics(metrics);
+        }
+        self.training.input_active = false;
+        self.training.start_time = None;
+    }
+
     pub fn on_tick(&mut self) {
         self.alerts.tick = self.alerts.tick.saturating_add(1);
-        let parser_telemetry = parser_telemetry_snapshot();
-        self.training.parser_success_count = parser_telemetry.success_count;
-        self.training.parser_skipped_count = parser_telemetry.skipped_count;
-        self.training.parser_error_count = parser_telemetry.error_count;
+        if self.run_detail_accepts_live_updates() {
+            let parser_telemetry = parser_telemetry_snapshot();
+            self.training.parser_success_count = parser_telemetry.success_count;
+            self.training.parser_skipped_count = parser_telemetry.skipped_count;
+            self.training.parser_error_count = parser_telemetry.error_count;
+        }
 
         if matches!(self.ui_state.mode, AppMode::Scanning) {
             self.ui_state.scanning_frame = (self.ui_state.scanning_frame + 1) % 4;
@@ -1954,9 +2288,11 @@ impl App {
             }
         }
 
-        if self.alerts.tick % Self::STORE_REFRESH_INTERVAL_TICKS == 0 {
-            self.load_recent_runs();
-            self.refresh_explorer_records();
+        if self.alerts.tick % Self::STORE_REFRESH_INTERVAL_TICKS == 0
+            && matches!(self.ui_state.mode, AppMode::Monitoring)
+            && matches!(self.ui_state.monitoring.route, MonitoringRoute::Home)
+        {
+            self.refresh_home_runs_state();
         }
 
         self.evaluate_alerts();
@@ -1988,6 +2324,88 @@ impl App {
             .as_deref()
     }
 
+    pub fn run_detail_accepts_live_updates(&self) -> bool {
+        if !matches!(self.ui_state.monitoring.route, MonitoringRoute::RunDetail) {
+            return true;
+        }
+
+        match self.selected_run_record() {
+            Some(record) => matches!(record.status, crate::store::types::RunStatus::Active),
+            None => true,
+        }
+    }
+
+    pub fn home_alert_records(&self) -> (Vec<AlertRecord>, Vec<AlertRecord>) {
+        (self.alerts.active.clone(), self.alerts.resolved.clone())
+    }
+
+    pub fn run_detail_alert_records(&self) -> (Vec<AlertRecord>, Vec<AlertRecord>) {
+        if self.run_detail_accepts_live_updates() {
+            return self.home_alert_records();
+        }
+
+        let Some(run_id) = self.run_detail_selected_run_id() else {
+            return (Vec::new(), Vec::new());
+        };
+
+        self.load_stored_alert_records(run_id)
+    }
+
+    fn load_stored_alert_records(&self, run_id: &str) -> (Vec<AlertRecord>, Vec<AlertRecord>) {
+        let Some(store) = self.run_store.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let Ok(events) = store.list_events(run_id) else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let mut active = Vec::new();
+        let mut resolved = Vec::new();
+
+        for event in events {
+            let message = event.note.unwrap_or_else(|| event.kind.clone());
+            let step_or_tick = event
+                .step
+                .unwrap_or_else(|| u64::try_from(event.event_epoch_secs).unwrap_or(0));
+            match event.kind.as_str() {
+                Self::RUN_EVENT_ALERT_WARNING => active.push(AlertRecord {
+                    rule_id: event.run_id,
+                    level: AlertLevel::Warning,
+                    value: 0.0,
+                    message,
+                    tick: step_or_tick,
+                }),
+                Self::RUN_EVENT_ALERT_CRITICAL => active.push(AlertRecord {
+                    rule_id: event.run_id,
+                    level: AlertLevel::Critical,
+                    value: 0.0,
+                    message,
+                    tick: step_or_tick,
+                }),
+                Self::RUN_EVENT_ALERT_RESOLVED_WARNING => resolved.push(AlertRecord {
+                    rule_id: event.run_id,
+                    level: AlertLevel::Warning,
+                    value: 0.0,
+                    message,
+                    tick: step_or_tick,
+                }),
+                Self::RUN_EVENT_ALERT_RESOLVED_CRITICAL => resolved.push(AlertRecord {
+                    rule_id: event.run_id,
+                    level: AlertLevel::Critical,
+                    value: 0.0,
+                    message,
+                    tick: step_or_tick,
+                }),
+                _ => {}
+            }
+        }
+
+        active.reverse();
+        resolved.reverse();
+        (active, resolved)
+    }
+
     pub fn graph_viewport_series(
         &self,
         graph_index: usize,
@@ -2008,6 +2426,16 @@ impl App {
     }
 
     pub fn push_metrics(&mut self, m: TrainingMetrics) {
+        if !self.run_detail_accepts_live_updates() {
+            return;
+        }
+
+        if matches!(self.ui_state.mode, AppMode::Monitoring)
+            && matches!(self.ui_state.monitoring.route, MonitoringRoute::RunDetail)
+        {
+            self.pending_home_run_refresh = true;
+        }
+
         let capacity = self.config.history_size;
 
         let invalid_count = Self::count_non_finite_metrics(&m);
@@ -2207,6 +2635,11 @@ impl App {
                         message: Self::alert_message(&rule_id, level, value),
                         tick: self.alerts.tick,
                     });
+                    self.persist_stream_alert_event(
+                        level,
+                        false,
+                        Self::alert_message(&rule_id, level, value),
+                    );
                 }
                 (Some(_), None) => {
                     if let Some(idx) = self
@@ -2218,6 +2651,8 @@ impl App {
                         let mut resolved = self.alerts.active.remove(idx);
                         resolved.message = format!("resolved at {:.3}", value);
                         resolved.tick = self.alerts.tick;
+                        let resolved_level = resolved.level;
+                        let resolved_message = resolved.message.clone();
                         self.alerts.resolved.push(resolved);
                         if self.alerts.resolved.len() > 20 {
                             let drain = self.alerts.resolved.len() - 20;
@@ -2226,9 +2661,11 @@ impl App {
                         self.alerts
                             .cooldown_until
                             .insert(rule_id.clone(), self.alerts.tick.saturating_add(30));
+                        self.persist_stream_alert_event(resolved_level, true, resolved_message);
                     }
                 }
                 (Some(current), Some(next)) if current != next => {
+                    let mut persisted_message: Option<String> = None;
                     if let Some(record) = self
                         .alerts
                         .active
@@ -2239,6 +2676,10 @@ impl App {
                         record.value = value;
                         record.tick = self.alerts.tick;
                         record.message = Self::alert_message(&rule_id, next, value);
+                        persisted_message = Some(record.message.clone());
+                    }
+                    if let Some(message) = persisted_message {
+                        self.persist_stream_alert_event(next, false, message);
                     }
                 }
                 (Some(_), Some(_)) => {
@@ -2437,6 +2878,31 @@ impl App {
             AlertLevel::Critical => "critical",
         };
         format!("{rule_id}: {level_text} at {value:.3}")
+    }
+
+    fn persist_stream_alert_event(&self, level: AlertLevel, resolved: bool, message: String) {
+        let Some(run_id) = self.current_stream_run_id.as_deref() else {
+            return;
+        };
+        let Some(store) = self.run_store.as_ref() else {
+            return;
+        };
+
+        let kind = match (resolved, level) {
+            (false, AlertLevel::Warning) => Self::RUN_EVENT_ALERT_WARNING,
+            (false, AlertLevel::Critical) => Self::RUN_EVENT_ALERT_CRITICAL,
+            (true, AlertLevel::Warning) => Self::RUN_EVENT_ALERT_RESOLVED_WARNING,
+            (true, AlertLevel::Critical) => Self::RUN_EVENT_ALERT_RESOLVED_CRITICAL,
+        };
+
+        let _ = store.add_event(
+            run_id,
+            kind,
+            Some(message.as_str()),
+            false,
+            crate::store::types::now_epoch_secs(),
+            self.current_run_step(),
+        );
     }
 
     pub fn set_run_comparison_snapshot(&mut self, baseline: Vec<TrainingMetrics>) {
@@ -4479,7 +4945,10 @@ mod tests {
         assert!(app.ui_state.explorer.records.is_empty());
         assert_eq!(app.ui_state.explorer.selected_idx, 0);
         assert!(!app.ui_state.explorer.search_active);
+        assert!(!app.ui_state.explorer.rename_active);
         assert!(app.ui_state.explorer.search_query.is_empty());
+        assert!(app.ui_state.explorer.rename_buffer.is_empty());
+        assert!(app.ui_state.explorer.pending_delete_run_id.is_none());
         assert!(app.ui_state.explorer.status_filter.is_none());
         assert_eq!(app.ui_state.selected_process_idx, 0);
     }
@@ -4520,7 +4989,10 @@ mod tests {
             HomeFocusTarget::Processes
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
-        assert_eq!(app.ui_state.monitoring.home_focus, HomeFocusTarget::Alerts);
+        assert_eq!(
+            app.ui_state.monitoring.home_focus,
+            HomeFocusTarget::Processes
+        );
     }
 
     #[test]
@@ -4676,6 +5148,352 @@ mod tests {
                 .selected_run_id
                 .as_deref(),
             Some("r1")
+        );
+    }
+
+    #[test]
+    fn test_explorer_rename_selected_run_persists_display_name() {
+        use crate::store::repository::RunStore;
+        use crate::store::types::{RunMetadata, RunSourceKind};
+
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+        app.ui_state.monitoring.home_focus = HomeFocusTarget::Runs;
+        app.set_store(RunStore::open_in_memory().expect("store should open"));
+
+        let attached = app
+            .run_store
+            .as_ref()
+            .expect("store should be set")
+            .attach_or_create_active_run(
+                "fp-rename-test",
+                RunSourceKind::LogFile,
+                RunMetadata {
+                    display_name: Some("old-name".to_string()),
+                    project_root: None,
+                    command: None,
+                    cwd: None,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some("/tmp/run.log".to_string()),
+                },
+            )
+            .expect("run should be created");
+
+        app.refresh_explorer_records();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app.ui_state.explorer.rename_active);
+
+        app.ui_state.explorer.rename_buffer.clear();
+        for c in "renamed-run".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let updated = app
+            .run_store
+            .as_ref()
+            .expect("store should exist")
+            .get_run(&attached.run_id)
+            .expect("run lookup should succeed")
+            .expect("run should remain");
+
+        assert_eq!(updated.display_name.as_deref(), Some("renamed-run"));
+    }
+
+    #[test]
+    fn test_explorer_delete_selected_run_requires_confirmation() {
+        use crate::store::repository::RunStore;
+        use crate::store::types::{RunMetadata, RunSourceKind};
+
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::Home;
+        app.ui_state.monitoring.focused_panel = Some(PanelFocus::Runs);
+        app.ui_state.monitoring.home_focus = HomeFocusTarget::Runs;
+        app.set_store(RunStore::open_in_memory().expect("store should open"));
+
+        let attached = app
+            .run_store
+            .as_ref()
+            .expect("store should be set")
+            .attach_or_create_active_run(
+                "fp-delete-test",
+                RunSourceKind::LogFile,
+                RunMetadata {
+                    display_name: Some("delete-me".to_string()),
+                    project_root: None,
+                    command: None,
+                    cwd: None,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some("/tmp/delete.log".to_string()),
+                },
+            )
+            .expect("run should be created");
+
+        app.refresh_explorer_records();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            app.ui_state.explorer.pending_delete_run_id.as_deref(),
+            Some(attached.run_id.as_str())
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.run_store
+                .as_ref()
+                .expect("store should exist")
+                .get_run(&attached.run_id)
+                .expect("run lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_run_detail_historical_selection_clears_live_snapshot_and_ignores_live_pushes() {
+        use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
+
+        let mut app = App::new(Config::default());
+        app.push_metrics(TrainingMetrics {
+            step: Some(1),
+            loss: Some(1.0),
+            ..TrainingMetrics::default()
+        });
+        assert!(app.training.latest.is_some());
+
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
+        app.ui_state.explorer.records = vec![RunRecord {
+            run_id: "old-run".to_string(),
+            source_fingerprint: "fp-old".to_string(),
+            source_kind: RunSourceKind::Stdin,
+            source_locator: Some("stdin".to_string()),
+            project_root: None,
+            display_name: Some("old-run".to_string()),
+            status: RunStatus::Completed,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 0,
+            ended_at_epoch_secs: Some(1),
+            last_step: Some(123),
+            last_updated_epoch_secs: 1,
+        }];
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("old-run".to_string());
+
+        app.load_run_detail_snapshot_for_selected_run();
+        assert!(app.training.latest.is_none());
+        assert!(app.training.loss_history.is_empty());
+
+        app.push_metrics(TrainingMetrics {
+            step: Some(2),
+            loss: Some(0.5),
+            ..TrainingMetrics::default()
+        });
+        assert!(app.training.latest.is_none());
+        assert!(app.training.loss_history.is_empty());
+    }
+
+    #[test]
+    fn test_run_detail_active_selection_still_accepts_live_pushes() {
+        use crate::store::types::{RunRecord, RunSourceKind, RunStatus};
+
+        let mut app = App::new(Config::default());
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
+        app.ui_state.explorer.records = vec![RunRecord {
+            run_id: "active-run".to_string(),
+            source_fingerprint: "fp-active".to_string(),
+            source_kind: RunSourceKind::Stdin,
+            source_locator: Some("stdin".to_string()),
+            project_root: None,
+            display_name: Some("active-run".to_string()),
+            status: RunStatus::Active,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 0,
+            ended_at_epoch_secs: None,
+            last_step: Some(1),
+            last_updated_epoch_secs: 1,
+        }];
+        app.ui_state.monitoring.run_detail.selected_run_id = Some("active-run".to_string());
+
+        app.push_metrics(TrainingMetrics {
+            step: Some(3),
+            loss: Some(0.25),
+            ..TrainingMetrics::default()
+        });
+
+        assert_eq!(app.training.latest.and_then(|m| m.step), Some(3));
+        assert!(!app.training.loss_history.is_empty());
+    }
+
+    #[test]
+    fn test_alert_events_persist_to_stream_run_history() {
+        use crate::store::repository::RunStore;
+        use crate::store::types::{RunMetadata, RunSourceKind};
+
+        let mut app = App::new(Config::default());
+        app.set_store(RunStore::open_in_memory().expect("store should open"));
+        app.config.alert_rules = vec![AlertRuleConfig {
+            id: Some("throughput_guard".to_string()),
+            kind: AlertRuleKind::ThroughputDrop,
+            mode: AlertEvalMode::Current,
+            warning: 100.0,
+            critical: 50.0,
+            enabled: true,
+        }];
+
+        let run_id = app
+            .run_store
+            .as_ref()
+            .expect("store should exist")
+            .attach_or_create_active_run(
+                "fp-alert-stream",
+                RunSourceKind::Stdin,
+                RunMetadata {
+                    display_name: Some("stream-run".to_string()),
+                    project_root: None,
+                    command: None,
+                    cwd: None,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some("stdin".to_string()),
+                },
+            )
+            .expect("attach should work")
+            .run_id;
+
+        app.set_current_stream_run_id(Some(run_id.clone()));
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(30.0),
+            step: Some(10),
+            ..TrainingMetrics::default()
+        });
+        app.push_metrics(TrainingMetrics {
+            throughput: Some(300.0),
+            step: Some(11),
+            ..TrainingMetrics::default()
+        });
+
+        let events = app
+            .run_store
+            .as_ref()
+            .expect("store should exist")
+            .list_events(&run_id)
+            .expect("events should list");
+        let kinds = events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.iter().any(|kind| *kind == "alert.critical"));
+        assert!(kinds.iter().any(|kind| *kind == "alert.resolved.critical"));
+    }
+
+    #[test]
+    fn test_run_detail_finished_run_uses_stored_alert_history() {
+        use crate::store::repository::RunStore;
+        use crate::store::types::{RunMetadata, RunRecord, RunSourceKind, RunStatus};
+
+        let mut app = App::new(Config::default());
+        app.set_store(RunStore::open_in_memory().expect("store should open"));
+
+        let run_id = app
+            .run_store
+            .as_ref()
+            .expect("store should exist")
+            .attach_or_create_active_run(
+                "fp-history-alert",
+                RunSourceKind::LogFile,
+                RunMetadata {
+                    display_name: Some("finished-run".to_string()),
+                    project_root: None,
+                    command: None,
+                    cwd: None,
+                    git_commit: None,
+                    git_dirty: None,
+                    source_locator: Some("/tmp/finished.log".to_string()),
+                },
+            )
+            .expect("attach should work")
+            .run_id;
+
+        app.run_store
+            .as_ref()
+            .expect("store should exist")
+            .complete_run(&run_id, RunStatus::Completed)
+            .expect("complete should work");
+        app.run_store
+            .as_ref()
+            .expect("store should exist")
+            .add_event(
+                &run_id,
+                "alert.warning",
+                Some("stored warning"),
+                false,
+                crate::store::types::now_epoch_secs(),
+                Some(20),
+            )
+            .expect("event should insert");
+        app.run_store
+            .as_ref()
+            .expect("store should exist")
+            .add_event(
+                &run_id,
+                "alert.resolved.warning",
+                Some("stored resolved"),
+                false,
+                crate::store::types::now_epoch_secs(),
+                Some(30),
+            )
+            .expect("event should insert");
+
+        app.alerts.active.push(AlertRecord {
+            rule_id: "global".to_string(),
+            level: AlertLevel::Critical,
+            value: 1.0,
+            message: "global live alert".to_string(),
+            tick: 1,
+        });
+
+        app.ui_state.monitoring.route = MonitoringRoute::RunDetail;
+        app.ui_state.explorer.records = vec![RunRecord {
+            run_id: run_id.clone(),
+            source_fingerprint: "fp-history-alert".to_string(),
+            source_kind: RunSourceKind::LogFile,
+            source_locator: Some("/tmp/finished.log".to_string()),
+            project_root: None,
+            display_name: Some("finished-run".to_string()),
+            status: RunStatus::Completed,
+            command: None,
+            cwd: None,
+            git_commit: None,
+            git_dirty: None,
+            started_at_epoch_secs: 1,
+            ended_at_epoch_secs: Some(2),
+            last_step: Some(30),
+            last_updated_epoch_secs: 2,
+        }];
+        app.ui_state.monitoring.run_detail.selected_run_id = Some(run_id);
+
+        let (active, resolved) = app.run_detail_alert_records();
+        assert!(
+            active
+                .iter()
+                .any(|alert| alert.message.contains("stored warning"))
+        );
+        assert!(
+            resolved
+                .iter()
+                .any(|alert| alert.message.contains("stored resolved"))
+        );
+        assert!(
+            !active
+                .iter()
+                .any(|alert| alert.message.contains("global live alert"))
         );
     }
 

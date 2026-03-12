@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 use epoch::home::service::{empty_snapshot, load_or_build_cached_snapshot, snapshot_cache_path};
 use epoch::store::repository::{RunStore, global_store_path, source_fingerprint};
@@ -122,7 +122,11 @@ async fn main() -> Result<()> {
                     .as_ref()
                     .map(|path| path.to_string_lossy().to_string());
                 let attach = store.attach_or_create_active_run(
-                    &source_fingerprint(RunSourceKind::Stdin, Some("stdin"), project_root.as_deref()),
+                    &source_fingerprint(
+                        RunSourceKind::Stdin,
+                        Some("stdin"),
+                        project_root.as_deref(),
+                    ),
                     RunSourceKind::Stdin,
                     RunMetadata {
                         display_name: Some("stdin session".to_string()),
@@ -179,7 +183,8 @@ async fn main() -> Result<()> {
         }
 
         if !app.running {
-            if let (Some(store), Some(run_id)) = (app.run_store.as_ref(), active_run_id.as_deref()) {
+            if let (Some(store), Some(run_id)) = (app.run_store.as_ref(), active_run_id.as_deref())
+            {
                 let _ = store.complete_run(run_id, RunStatus::Completed);
             }
             return Ok(());
@@ -201,23 +206,93 @@ async fn main() -> Result<()> {
             Duration::from_millis(config.tick_rate_ms.saturating_mul(4)),
         );
 
-        while app.running {
-            terminal.draw(|frame| epoch::ui::render(frame, &app))?;
+        let mut pending_last_step: Option<u64> = None;
+        let step_persist_interval =
+            Duration::from_millis(config.tick_rate_ms.saturating_mul(4).max(250));
+        let mut last_step_persist_at = Instant::now();
 
+        terminal.draw(|frame| epoch::ui::render(frame, &app))?;
+
+        while app.running {
             tokio::select! {
-                Some(event) = event_rx.recv() => app.handle_event(event),
-                Some(metrics) = metrics_rx.recv() => {
-                    let step = metrics.step;
-                    app.push_metrics(metrics);
-                    if let (Some(store), Some(run_id), Some(step)) = (app.run_store.as_ref(), active_run_id.as_deref(), step) {
-                        let _ = store.update_last_step(run_id, step);
+                biased;
+                Some(event) = event_rx.recv() => {
+                    let is_tick = matches!(event, epoch::event::Event::Tick);
+                    app.handle_event(event);
+
+                    if is_tick && last_step_persist_at.elapsed() >= step_persist_interval {
+                        if let (Some(store), Some(run_id), Some(step)) = (
+                            app.run_store.as_ref(),
+                            active_run_id.as_deref(),
+                            pending_last_step,
+                        ) {
+                            if store.update_last_step(run_id, step).is_ok() {
+                                pending_last_step = None;
+                                last_step_persist_at = Instant::now();
+                            }
+                        }
                     }
                 },
+                Some(metrics) = metrics_rx.recv() => {
+                    if let Some(step) = metrics.step {
+                        pending_last_step = Some(step);
+                    }
+                    app.push_metrics(metrics);
+                },
                 Some(system) = system_rx.recv() => app.push_system(system),
-                Some(files) = discovery_rx.recv() => { app.set_discovered_files(files); },
+                Some(files) = discovery_rx.recv() => app.set_discovered_files(files),
                 Some(processes) = process_rx.recv() => app.set_discovered_processes(processes),
                 _ = tokio::signal::ctrl_c() => app.running = false,
             }
+
+            while let Ok(event) = event_rx.try_recv() {
+                let is_tick = matches!(event, epoch::event::Event::Tick);
+                app.handle_event(event);
+
+                if is_tick && last_step_persist_at.elapsed() >= step_persist_interval {
+                    if let (Some(store), Some(run_id), Some(step)) = (
+                        app.run_store.as_ref(),
+                        active_run_id.as_deref(),
+                        pending_last_step,
+                    ) {
+                        if store.update_last_step(run_id, step).is_ok() {
+                            pending_last_step = None;
+                            last_step_persist_at = Instant::now();
+                        }
+                    }
+                }
+            }
+
+            while let Ok(metrics) = metrics_rx.try_recv() {
+                if let Some(step) = metrics.step {
+                    pending_last_step = Some(step);
+                }
+                app.push_metrics(metrics);
+            }
+
+            while let Ok(system) = system_rx.try_recv() {
+                app.push_system(system);
+            }
+
+            while let Ok(files) = discovery_rx.try_recv() {
+                app.set_discovered_files(files);
+            }
+
+            while let Ok(processes) = process_rx.try_recv() {
+                app.set_discovered_processes(processes);
+            }
+
+            if app.running {
+                terminal.draw(|frame| epoch::ui::render(frame, &app))?;
+            }
+        }
+
+        if let (Some(store), Some(run_id), Some(step)) = (
+            app.run_store.as_ref(),
+            active_run_id.as_deref(),
+            pending_last_step,
+        ) {
+            let _ = store.update_last_step(run_id, step);
         }
 
         if let (Some(store), Some(run_id)) = (app.run_store.as_ref(), active_run_id.as_deref()) {
