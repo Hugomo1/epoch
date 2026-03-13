@@ -32,16 +32,15 @@
 ```bash
 git clone https://github.com/GranneJanne/epoch.git
 cd epoch
-cargo build --release
+cargo install --path .
+
+epoch
 
 # watch a log file
-./target/release/epoch train.log
+epoch train.log
 
 # or pipe directly from a training script
-python train.py 2>&1 | ./target/release/epoch --stdin
-
-# or let epoch discover a run in the current directory
-./target/release/epoch
+python train.py 2>&1 | epoch --stdin
 ```
 
 ## Why epoch
@@ -151,58 +150,6 @@ window = 10
 header_bg = "#1e1e2e"
 accent = "#89b4fa"
 ```
-
-## Roadmap
-
-The long-term goal is not to build a better log viewer. It is to make `epoch` the place you stay during training — an operating environment, not a one-shot dashboard.
-
-Development follows five pillars:
-
-1. **Live observability** — excellent while training is happening
-2. **Habitable environment** — inspect, compare, annotate, and navigate, not just watch
-3. **Standalone and local-first** — no accounts, no cloud, no required web connection
-4. **Anywhere on the machine** — discover projects, runs, and processes from any directory
-5. **Model understanding** — make architecture and training state legible, not just metrics
-
-### Phase 1: Foundations
-
-- local run store and project resolution
-- active process discovery
-- home view with orientation and entry points
-- live run monitoring
-- run explorer with filtering and search
-- launch-from-anywhere support
-- notes, bookmarks, and event timeline
-
-### Phase 2: Habitable environment
-
-- run comparison (config diff, curve overlay, metric summary)
-- artifact browser (checkpoints, configs, logs, eval outputs)
-- session memory (remembered runs, comparisons, context)
-- global finder / command palette
-- attach and resume workflows
-- alerting and anomaly surfacing
-
-### Phase 3: Model understanding
-
-- model structure visualization (module hierarchy, block flow)
-- parameter and trainability summaries
-- frozen / trainable / adapter overlays
-- model diff between runs or checkpoints
-
-### Phase 4: Advanced operational insight
-
-- runtime overlays (gradient norms, memory hotspots, latency per block)
-- distributed training awareness (rank status, desync detection)
-- deeper framework adapters (PyTorch Lightning, DeepSpeed, Accelerate)
-- richer eval and sample inspection
-
-### Phase 5: Optional expansions
-
-- exportable summaries and reports
-- optional sync and sharing layer
-- plugin ecosystem
-- TensorBoard event file import
 
 ## Contributing
 
