@@ -48,12 +48,13 @@ jobs:
           fi
         shell: bash
       - name: Verify build exists
+        shell: bash
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            ls -la target/${{ matrix.target }}/release/epoch || echo "Binary not found"
-          else
-            ls -la target/${{ matrix.target }}/release/epoch || echo "Binary not found"
+          binary="target/${{ matrix.target }}/release/epoch"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            binary="${binary}.exe"
           fi
+          ls -la "$binary"
       - name: Upload artifacts
         uses: softprops/action-gh-release@v2
         with:
